@@ -26,6 +26,38 @@ make build
   --enterprise-registry ../enterprise-kernloom-registry
 ```
 
+## Forge API and Jobs
+
+Slice 2 adds an authenticated Forge API and an async simulation job shell. Start the dev services first, then run the API and worker against Redis:
+
+```sh
+podman compose -f docker-compose.dev.yml up -d redis
+make build
+
+./bin/forge api --addr :8080 --queue redis --redis-addr 127.0.0.1:6379
+```
+
+Dev bearer tokens use this local format:
+
+```text
+dev:<subject>:<comma-separated-roles>:<org>:<environment>:<stage>
+```
+
+Example submit/read flow:
+
+```sh
+TOKEN='dev:alice:policy-author:acme:dev:prod'
+
+curl -sS -H "Authorization: Bearer ${TOKEN}" \
+  -H 'Content-Type: application/json' \
+  -d '{"policy_file":"../enterprise-kernloom-policies/policies/delegation/ziti-readonly-observation.intent.kni","scope":{"org":"acme","stage":"prod"}}' \
+  http://127.0.0.1:8080/v1/simulation-jobs
+
+./bin/forge-worker run-once --queue redis --redis-addr 127.0.0.1:6379
+```
+
+The API also accepts signed JWTs with OIDC/OAuth2-style claims when started with `--oidc-hmac-secret`; the dev token provider can be disabled with `--dev-tokens=false`.
+
 ## Dev Services
 
 ```sh
