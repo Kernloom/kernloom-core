@@ -125,7 +125,7 @@ func compileOne(card *intent.Card, catalog *registry.Catalog, celValidator *expr
 		}
 		resolved.Spec.Prohibit = append(resolved.Spec.Prohibit, resolvedValue(value))
 	}
-	runtime, err := resolveRuntime(card.Runtime, catalog)
+	runtime, err := resolveRuntime(card.Runtime, catalog, profile)
 	if err != nil {
 		return Result{}, err
 	}
@@ -145,8 +145,8 @@ func compileOne(card *intent.Card, catalog *registry.Catalog, celValidator *expr
 	coverage := MeaningCoverageReport{
 		Kind:     "MeaningCoverageReport",
 		PolicyID: card.ID,
-		Status:   "implementable",
-		Message:  "Slice 1 compiler resolved all normative authoring values.",
+		Status:   "resolved_only",
+		Message:  "Slice 1 compiler resolved normative authoring values; multi-system meaning coverage has not been evaluated.",
 	}
 	coveragePath, coverageHash, err := writeJSON(filepath.Join(opts.OutputDir, "reports", card.ID+".coverage.json"), coverage)
 	if err != nil {
@@ -154,13 +154,22 @@ func compileOne(card *intent.Card, catalog *registry.Catalog, celValidator *expr
 	}
 	simulationReport := SimulationReport{Kind: "SimulationReport", PolicyID: card.ID}
 	for _, simulation := range resolved.Spec.Simulations {
-		simulationReport.Simulations = append(simulationReport.Simulations, SimulationStatus{Name: simulation.Name, Status: "resolved"})
+		simulationReport.Simulations = append(simulationReport.Simulations, SimulationStatus{Name: simulation.Name, Status: "resolved_only"})
 	}
 	simulationPath, simulationHash, err := writeJSON(filepath.Join(opts.OutputDir, "reports", card.ID+".simulation.json"), simulationReport)
 	if err != nil {
 		return Result{}, err
 	}
-	validation := ValidationResult{Kind: "ValidationResult", PolicyID: card.ID, Passed: true}
+	validation := ValidationResult{
+		Kind:     "ValidationResult",
+		PolicyID: card.ID,
+		Status:   "not_evaluated",
+		Passed:   false,
+		Findings: []string{
+			"Slice 1 performed parser, catalog resolution and CEL validation only; full policy validation is not implemented.",
+			"Risk recipes are loaded and CEL-checked only; scoring, freshness, confidence and runtime simulation are not evaluated.",
+		},
+	}
 	validationPath, validationHash, err := writeJSON(filepath.Join(opts.OutputDir, "reports", card.ID+".validation.json"), validation)
 	if err != nil {
 		return Result{}, err
@@ -214,6 +223,15 @@ func validateMetadata(card *intent.Card, catalog *registry.Catalog) error {
 	}
 	if card.ID == "" || card.Owner == "" || card.Type == "" || card.Target == "" || card.Stage == "" {
 		return fmt.Errorf("%s: missing required intent metadata", card.ID)
+	}
+	if _, err := catalog.Resolve(card.Type, "policy_type"); err != nil {
+		return fmt.Errorf("%s: invalid policy type: %w", card.ID, err)
+	}
+	if _, err := catalog.Resolve(card.Target, "target_system"); err != nil {
+		return fmt.Errorf("%s: invalid target: %w", card.ID, err)
+	}
+	if _, err := catalog.Resolve(card.Stage, "stage"); err != nil {
+		return fmt.Errorf("%s: invalid stage: %w", card.ID, err)
 	}
 	if len(card.Rules) == 0 {
 		return fmt.Errorf("%s: intent requires at least one rule", card.ID)
@@ -276,15 +294,35 @@ func resolveRule(rule intent.Rule, catalog *registry.Catalog, celValidator *expr
 	return resolved, nil
 }
 
-func resolveRuntime(runtime intent.Runtime, catalog *registry.Catalog) (ResolvedRuntime, error) {
-	scope, err := catalog.Resolve(runtime.MaxScope, "scope")
+func resolveRuntime(runtime intent.Runtime, catalog *registry.Catalog, profile registry.Profile) (ResolvedRuntime, error) {
+	maxTTL := runtime.MaxTTL
+	maxTTLSource := "policy"
+	if maxTTL == "" {
+		maxTTL = profile.RuntimeDefaults["max_ttl"]
+		maxTTLSource = "profile_default"
+	}
+	maxScope := runtime.MaxScope
+	maxScopeSource := "policy"
+	if maxScope == "" {
+		maxScope = profile.RuntimeDefaults["max_scope"]
+		maxScopeSource = "profile_default"
+	}
+	if maxTTL == "" {
+		return ResolvedRuntime{}, fmt.Errorf("runtime max_ttl is missing and profile %q has no default", profile.ID)
+	}
+	if maxScope == "" {
+		return ResolvedRuntime{}, fmt.Errorf("runtime max_scope is missing and profile %q has no default", profile.ID)
+	}
+	scope, err := catalog.Resolve(maxScope, "scope")
 	if err != nil {
 		return ResolvedRuntime{}, err
 	}
 	resolved := ResolvedRuntime{
-		Allowed:  runtime.Allowed,
-		MaxTTL:   runtime.MaxTTL,
-		MaxScope: resolvedValue(scope),
+		Allowed:        runtime.Allowed,
+		MaxTTL:         maxTTL,
+		MaxTTLSource:   maxTTLSource,
+		MaxScope:       resolvedValue(scope),
+		MaxScopeSource: maxScopeSource,
 	}
 	for _, label := range runtime.Actions {
 		value, err := catalog.Resolve(label, "runtime_action")
@@ -374,6 +412,17 @@ func writeReview(path string, card *intent.Card, resolved ResolvedPolicy) (strin
 	fmt.Fprintf(&b, "# Natural Intent Review: %s\n\n", card.ID)
 	fmt.Fprintf(&b, "Forge understood this intent as `%s` policy for `%s` in `%s`.\n\n", card.Type, card.Target, card.Stage)
 	fmt.Fprintf(&b, "Profile: `%s`\n\n", card.Profile)
+	fmt.Fprintf(&b, "## Metadata\n\n")
+	fmt.Fprintf(&b, "- Owner: `%s`\n", resolved.Spec.Owner)
+	fmt.Fprintf(&b, "- Type: `%s`\n", resolved.Spec.Type)
+	fmt.Fprintf(&b, "- Target: `%s`\n", resolved.Spec.Target)
+	fmt.Fprintf(&b, "- Stage: `%s`\n", resolved.Spec.Stage)
+	fmt.Fprintf(&b, "- Risk Recipe: `%s`\n\n", resolved.Spec.RiskRecipe)
+	fmt.Fprintf(&b, "## Applied Guardrails\n\n")
+	for _, guardrail := range resolved.Spec.Guardrails {
+		fmt.Fprintf(&b, "- `%s`\n", guardrail)
+	}
+	fmt.Fprintf(&b, "\n")
 	for _, rule := range resolved.Spec.Rules {
 		fmt.Fprintf(&b, "## Rule: %s\n\n", rule.Name)
 		fmt.Fprintf(&b, "Subject: `%s` -> `%s`\n\n", rule.Subject.Label, rule.Subject.CanonicalID)
@@ -382,7 +431,41 @@ func writeReview(path string, card *intent.Card, resolved ResolvedPolicy) (strin
 		fmt.Fprintf(&b, "Effect: `%s` -> `%s`\n\n", rule.Effect.Label, rule.Effect.CanonicalID)
 		fmt.Fprintf(&b, "CEL:\n\n```cel\n%s\n```\n\n", rule.CEL)
 	}
-	fmt.Fprintf(&b, "## Findings\n\nnone\n")
+	if len(resolved.Spec.RiskBehavior) > 0 {
+		fmt.Fprintf(&b, "## Risk Behavior\n\n")
+		for _, behavior := range resolved.Spec.RiskBehavior {
+			fmt.Fprintf(&b, "- `%s` `%s` -> `%s`\n", behavior.RiskType.Label, behavior.Tier.Label, behavior.Effect.Label)
+		}
+		fmt.Fprintf(&b, "\n")
+	}
+	if len(resolved.Spec.Prohibit) > 0 {
+		fmt.Fprintf(&b, "## Prohibited Outcomes\n\n")
+		for _, outcome := range resolved.Spec.Prohibit {
+			fmt.Fprintf(&b, "- `%s` -> `%s`\n", outcome.Label, outcome.CanonicalID)
+		}
+		fmt.Fprintf(&b, "\n")
+	}
+	fmt.Fprintf(&b, "## Runtime\n\n")
+	fmt.Fprintf(&b, "- Allowed: `%t`\n", resolved.Spec.Runtime.Allowed)
+	fmt.Fprintf(&b, "- Max TTL: `%s` (%s)\n", resolved.Spec.Runtime.MaxTTL, resolved.Spec.Runtime.MaxTTLSource)
+	fmt.Fprintf(&b, "- Max Scope: `%s` -> `%s` (%s)\n", resolved.Spec.Runtime.MaxScope.Label, resolved.Spec.Runtime.MaxScope.CanonicalID, resolved.Spec.Runtime.MaxScopeSource)
+	for _, action := range resolved.Spec.Runtime.Actions {
+		fmt.Fprintf(&b, "- Action: `%s` -> `%s`\n", action.Label, action.CanonicalID)
+	}
+	fmt.Fprintf(&b, "\n")
+	if len(resolved.Spec.Simulations) > 0 {
+		fmt.Fprintf(&b, "## Simulation Examples\n\n")
+		for _, simulation := range resolved.Spec.Simulations {
+			fmt.Fprintf(&b, "- `%s`: resolved only, expected `%s`\n", simulation.Name, simulation.ExpectEffect.Label)
+		}
+		fmt.Fprintf(&b, "\n")
+	}
+	fmt.Fprintf(&b, "## Reports\n\n")
+	fmt.Fprintf(&b, "- Meaning coverage: `resolved_only`\n")
+	fmt.Fprintf(&b, "- Simulation: `resolved_only`\n")
+	fmt.Fprintf(&b, "- Risk recipe evaluation: `not_evaluated`\n")
+	fmt.Fprintf(&b, "- Validation: `not_evaluated`\n\n")
+	fmt.Fprintf(&b, "## Findings\n\nnone blocking during Slice 1 resolution\n")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return "", err
 	}

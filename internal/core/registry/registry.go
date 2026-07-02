@@ -18,6 +18,7 @@ type Catalog struct {
 	RiskRecipes map[string]RiskRecipe
 	CoreVersion string
 	byLabel     map[string][]Value
+	byLabelKind map[string]Value
 }
 
 type Value struct {
@@ -29,6 +30,8 @@ type Value struct {
 
 type Profile struct {
 	ID              string            `yaml:"id" json:"id"`
+	Mode            string            `yaml:"mode,omitempty" json:"mode,omitempty"`
+	Owner           string            `yaml:"owner,omitempty" json:"owner,omitempty"`
 	Stage           string            `yaml:"stage" json:"stage"`
 	Guardrails      []string          `yaml:"guardrails" json:"guardrails"`
 	RuntimeDefaults map[string]string `yaml:"runtime_defaults" json:"runtime_defaults"`
@@ -71,6 +74,9 @@ func Load(coreRegistryPath, enterpriseRegistryPath string) (*Catalog, error) {
 		if err := catalog.loadEnterpriseVocabulary(filepath.Join(enterpriseRegistryPath, "enterprise", "vocabulary.yaml")); err != nil {
 			return nil, err
 		}
+		if err := catalog.loadEnterpriseProfiles(filepath.Join(enterpriseRegistryPath, "enterprise", "profiles.yaml")); err != nil {
+			return nil, err
+		}
 	}
 	catalog.reindex()
 	return catalog, nil
@@ -109,18 +115,24 @@ func (c *Catalog) RiskRecipe(id string) (RiskRecipe, bool) {
 
 func (c *Catalog) reindex() {
 	c.byLabel = map[string][]Value{}
+	c.byLabelKind = map[string]Value{}
 	for _, value := range c.Values {
 		c.byLabel[value.Label] = append(c.byLabel[value.Label], value)
+		c.byLabelKind[labelKind(value.Label, value.Kind)] = value
 	}
 }
 
-func (c *Catalog) addValue(value Value) {
-	for _, existing := range c.Values {
-		if existing.Label == value.Label && existing.Kind == value.Kind {
-			return
+func (c *Catalog) addValue(value Value) error {
+	if existing, ok := c.byLabelKind[labelKind(value.Label, value.Kind)]; ok {
+		if existing.CanonicalID != value.CanonicalID {
+			return fmt.Errorf("registry duplicate label/kind %q/%q maps to both %q and %q", value.Label, value.Kind, existing.CanonicalID, value.CanonicalID)
 		}
+		return nil
 	}
 	c.Values = append(c.Values, value)
+	c.byLabel[value.Label] = append(c.byLabel[value.Label], value)
+	c.byLabelKind[labelKind(value.Label, value.Kind)] = value
+	return nil
 }
 
 func loadCoreCatalog(path string) (*Catalog, error) {
@@ -176,8 +188,9 @@ func (c *Catalog) loadEnterpriseVocabulary(path string) error {
 	var doc struct {
 		Spec struct {
 			Terms []struct {
-				ID    string `yaml:"id"`
-				Label string `yaml:"label"`
+				ID      string   `yaml:"id"`
+				Label   string   `yaml:"label"`
+				Aliases []string `yaml:"aliases"`
 			} `yaml:"terms"`
 		} `yaml:"spec"`
 	}
@@ -185,9 +198,73 @@ func (c *Catalog) loadEnterpriseVocabulary(path string) error {
 		return err
 	}
 	for _, term := range doc.Spec.Terms {
-		c.addValue(Value{Label: term.Label, CanonicalID: term.ID, Kind: inferKind(term.ID)})
+		value := Value{Label: term.Label, CanonicalID: term.ID, Kind: inferKind(term.ID)}
+		if err := c.addValue(value); err != nil {
+			return err
+		}
+		for _, alias := range term.Aliases {
+			if err := c.addValue(Value{Label: alias, CanonicalID: term.ID, Kind: value.Kind}); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
+}
+
+func (c *Catalog) loadEnterpriseProfiles(path string) error {
+	profiles, err := loadProfiles(path)
+	if err != nil {
+		return err
+	}
+	for _, enterprise := range profiles {
+		existing, ok := c.Profiles[enterprise.ID]
+		switch enterprise.Mode {
+		case "inherited":
+			if !ok {
+				return fmt.Errorf("enterprise profile %q uses inherited mode but no core profile exists", enterprise.ID)
+			}
+			c.Profiles[enterprise.ID] = mergeProfile(existing, enterprise)
+		case "override":
+			if !ok {
+				return fmt.Errorf("enterprise profile %q uses override mode but no core profile exists", enterprise.ID)
+			}
+			c.Profiles[enterprise.ID] = mergeProfile(existing, enterprise)
+		case "":
+			if ok {
+				return fmt.Errorf("enterprise profile %q duplicates a core profile without mode", enterprise.ID)
+			}
+			c.Profiles[enterprise.ID] = enterprise
+		default:
+			return fmt.Errorf("enterprise profile %q has unsupported mode %q", enterprise.ID, enterprise.Mode)
+		}
+	}
+	return nil
+}
+
+func mergeProfile(base, overlay Profile) Profile {
+	merged := base
+	merged.Mode = overlay.Mode
+	merged.Owner = overlay.Owner
+	if overlay.Stage != "" {
+		merged.Stage = overlay.Stage
+	}
+	if overlay.Guardrails != nil {
+		merged.Guardrails = overlay.Guardrails
+	}
+	if overlay.RuntimeDefaults != nil {
+		merged.RuntimeDefaults = map[string]string{}
+		for key, value := range base.RuntimeDefaults {
+			merged.RuntimeDefaults[key] = value
+		}
+		for key, value := range overlay.RuntimeDefaults {
+			merged.RuntimeDefaults[key] = value
+		}
+	}
+	return merged
+}
+
+func labelKind(label, kind string) string {
+	return label + "\x00" + kind
 }
 
 func inferKind(id string) string {

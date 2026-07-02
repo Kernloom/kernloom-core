@@ -71,10 +71,12 @@ type ResolvedRiskBehavior struct {
 }
 
 type ResolvedRuntime struct {
-	Allowed  bool            `json:"allowed"`
-	Actions  []ResolvedValue `json:"actions,omitempty"`
-	MaxTTL   string          `json:"max_ttl"`
-	MaxScope ResolvedValue   `json:"max_scope"`
+	Allowed        bool            `json:"allowed"`
+	Actions        []ResolvedValue `json:"actions,omitempty"`
+	MaxTTL         string          `json:"max_ttl"`
+	MaxTTLSource   string          `json:"max_ttl_source"`
+	MaxScope       ResolvedValue   `json:"max_scope"`
+	MaxScopeSource string          `json:"max_scope_source"`
 }
 
 type ResolvedSimulation struct {
@@ -151,6 +153,7 @@ type SimulationStatus struct {
 type ValidationResult struct {
 	Kind     string   `json:"kind"`
 	PolicyID string   `json:"policy_id"`
+	Status   string   `json:"status"`
 	Passed   bool     `json:"passed"`
 	Findings []string `json:"findings"`
 }

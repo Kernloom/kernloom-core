@@ -25,6 +25,8 @@ func NewCELValidator() (*CELValidator, error) {
 		cel.Variable("network", cel.DynType),
 		cel.Variable("relationship", cel.DynType),
 		cel.Variable("runtime_anomaly", cel.DynType),
+		cel.Variable("source", cel.DynType),
+		cel.Variable("exception", cel.DynType),
 		cel.Variable("score", cel.IntType),
 	)
 	if err != nil {
