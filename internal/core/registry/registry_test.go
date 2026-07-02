@@ -39,6 +39,12 @@ spec:
 spec:
   recipes: []
 `)
+	writeRegistryFile(t, filepath.Join(coreRegistry, "defaults", "guardrails.yaml"), `kind: GuardrailPack
+spec:
+  guardrails:
+    - id: guardrail.unknown_is_not_success
+      mode: block
+`)
 	writeRegistryFile(t, filepath.Join(enterpriseRegistry, "enterprise", "vocabulary.yaml"), `kind: EnterpriseVocabulary
 spec:
   terms:
@@ -100,6 +106,10 @@ spec:
 spec:
   recipes: []
 `)
+	writeRegistryFile(t, filepath.Join(coreRegistry, "defaults", "guardrails.yaml"), `kind: GuardrailPack
+spec:
+  guardrails: []
+`)
 	writeRegistryFile(t, filepath.Join(enterpriseRegistry, "enterprise", "vocabulary.yaml"), `kind: EnterpriseVocabulary
 spec:
   terms:
@@ -117,6 +127,47 @@ spec:
 	}
 	if !strings.Contains(err.Error(), "duplicate label/kind") {
 		t.Fatalf("expected duplicate label/kind error, got %v", err)
+	}
+}
+
+func TestLoadRejectsUnknownProfileGuardrail(t *testing.T) {
+	root := t.TempDir()
+	coreRegistry := filepath.Join(root, "kernloom-core-registry")
+
+	writeRegistryFile(t, filepath.Join(coreRegistry, "core", "authoring_catalog.yaml"), `kind: AuthoringCatalog
+metadata:
+  version: vtest
+spec:
+  values: []
+`)
+	writeRegistryFile(t, filepath.Join(coreRegistry, "defaults", "profiles.yaml"), `kind: ProfileSet
+spec:
+  profiles:
+    - id: production.high_assurance_access
+      stage: prod
+      guardrails:
+        - guardrail.missing
+      runtime_defaults:
+        max_ttl: 15m
+        max_scope: user
+`)
+	writeRegistryFile(t, filepath.Join(coreRegistry, "defaults", "risk_recipes.yaml"), `kind: RiskRecipeSet
+spec:
+  recipes: []
+`)
+	writeRegistryFile(t, filepath.Join(coreRegistry, "defaults", "guardrails.yaml"), `kind: GuardrailPack
+spec:
+  guardrails:
+    - id: guardrail.unknown_is_not_success
+      mode: block
+`)
+
+	_, err := Load(coreRegistry, "")
+	if err == nil {
+		t.Fatal("expected unknown profile guardrail to be rejected")
+	}
+	if !strings.Contains(err.Error(), "unknown guardrail") {
+		t.Fatalf("expected unknown guardrail error, got %v", err)
 	}
 }
 

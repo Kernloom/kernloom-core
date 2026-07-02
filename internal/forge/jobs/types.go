@@ -62,15 +62,21 @@ type SimulationResult struct {
 }
 
 type SimulationPolicyResult struct {
-	PolicyID       string `json:"policy_id"`
-	ReviewPath     string `json:"review_path"`
-	ResolvedPath   string `json:"resolved_path"`
-	ManifestPath   string `json:"manifest_path"`
-	CoveragePath   string `json:"coverage_path"`
-	SimulationPath string `json:"simulation_path"`
-	ValidationPath string `json:"validation_path"`
-	ResolvedSHA256 string `json:"resolved_sha256"`
-	ManifestSHA256 string `json:"manifest_sha256"`
+	PolicyID                     string `json:"policy_id"`
+	ReviewPath                   string `json:"review_path"`
+	ResolvedPath                 string `json:"resolved_path"`
+	RuntimeBundlePath            string `json:"runtime_bundle_path"`
+	ContextRoutePackPath         string `json:"context_route_pack_path"`
+	ConformanceExpectationPath   string `json:"conformance_expectation_path"`
+	ManifestPath                 string `json:"manifest_path"`
+	CoveragePath                 string `json:"coverage_path"`
+	SimulationPath               string `json:"simulation_path"`
+	ValidationPath               string `json:"validation_path"`
+	ResolvedSHA256               string `json:"resolved_sha256"`
+	RuntimeBundleSHA256          string `json:"runtime_bundle_sha256"`
+	ContextRoutePackSHA256       string `json:"context_route_pack_sha256"`
+	ConformanceExpectationSHA256 string `json:"conformance_expectation_sha256"`
+	ManifestSHA256               string `json:"manifest_sha256"`
 }
 
 func NewJob(jobType, createdBy string, payload any) (*Job, error) {

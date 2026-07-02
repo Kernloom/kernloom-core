@@ -16,6 +16,7 @@ type Catalog struct {
 	Values      []Value
 	Profiles    map[string]Profile
 	RiskRecipes map[string]RiskRecipe
+	Guardrails  map[string]Guardrail
 	CoreVersion string
 	byLabel     map[string][]Value
 	byLabelKind map[string]Value
@@ -44,6 +45,12 @@ type RiskRecipe struct {
 	Thresholds map[string]string `yaml:"thresholds" json:"thresholds"`
 }
 
+type Guardrail struct {
+	ID          string `yaml:"id" json:"id"`
+	Mode        string `yaml:"mode" json:"mode"`
+	Description string `yaml:"description" json:"description"`
+}
+
 type ResolveError struct {
 	Code  string
 	Label string
@@ -67,8 +74,13 @@ func Load(coreRegistryPath, enterpriseRegistryPath string) (*Catalog, error) {
 	if err != nil {
 		return nil, err
 	}
+	guardrails, err := loadGuardrails(filepath.Join(coreRegistryPath, "defaults", "guardrails.yaml"))
+	if err != nil {
+		return nil, err
+	}
 	catalog.Profiles = profiles
 	catalog.RiskRecipes = riskRecipes
+	catalog.Guardrails = guardrails
 
 	if enterpriseRegistryPath != "" {
 		if err := catalog.loadEnterpriseVocabulary(filepath.Join(enterpriseRegistryPath, "enterprise", "vocabulary.yaml")); err != nil {
@@ -77,6 +89,9 @@ func Load(coreRegistryPath, enterpriseRegistryPath string) (*Catalog, error) {
 		if err := catalog.loadEnterpriseProfiles(filepath.Join(enterpriseRegistryPath, "enterprise", "profiles.yaml")); err != nil {
 			return nil, err
 		}
+	}
+	if err := catalog.validateProfileGuardrails(); err != nil {
+		return nil, err
 	}
 	catalog.reindex()
 	return catalog, nil
@@ -182,6 +197,39 @@ func loadRiskRecipes(path string) (map[string]RiskRecipe, error) {
 		recipes[recipe.ID] = recipe
 	}
 	return recipes, nil
+}
+
+func loadGuardrails(path string) (map[string]Guardrail, error) {
+	var doc struct {
+		Spec struct {
+			Guardrails []Guardrail `yaml:"guardrails"`
+		} `yaml:"spec"`
+	}
+	if err := readYAML(path, &doc); err != nil {
+		return nil, err
+	}
+	guardrails := map[string]Guardrail{}
+	for _, guardrail := range doc.Spec.Guardrails {
+		if guardrail.ID == "" {
+			return nil, fmt.Errorf("%s: guardrail without id", path)
+		}
+		if _, exists := guardrails[guardrail.ID]; exists {
+			return nil, fmt.Errorf("%s: duplicate guardrail %q", path, guardrail.ID)
+		}
+		guardrails[guardrail.ID] = guardrail
+	}
+	return guardrails, nil
+}
+
+func (c *Catalog) validateProfileGuardrails() error {
+	for _, profile := range c.Profiles {
+		for _, guardrailID := range profile.Guardrails {
+			if _, ok := c.Guardrails[guardrailID]; !ok {
+				return fmt.Errorf("profile %q references unknown guardrail %q", profile.ID, guardrailID)
+			}
+		}
+	}
+	return nil
 }
 
 func (c *Catalog) loadEnterpriseVocabulary(path string) error {

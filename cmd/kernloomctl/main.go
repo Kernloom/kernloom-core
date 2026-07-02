@@ -34,5 +34,5 @@ func registryValidate(args []string) {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	fmt.Printf("RegistryValidationReport: ok values=%d profiles=%d risk_recipes=%d\n", len(catalog.Values), len(catalog.Profiles), len(catalog.RiskRecipes))
+	fmt.Printf("RegistryValidationReport: ok values=%d profiles=%d risk_recipes=%d guardrails=%d\n", len(catalog.Values), len(catalog.Profiles), len(catalog.RiskRecipes), len(catalog.Guardrails))
 }

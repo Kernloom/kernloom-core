@@ -14,15 +14,21 @@ type Options struct {
 }
 
 type Result struct {
-	PolicyID       string
-	ReviewPath     string
-	ResolvedPath   string
-	ManifestPath   string
-	CoveragePath   string
-	SimulationPath string
-	ValidationPath string
-	ResolvedSHA256 string
-	ManifestSHA256 string
+	PolicyID                     string
+	ReviewPath                   string
+	ResolvedPath                 string
+	RuntimeBundlePath            string
+	ContextRoutePackPath         string
+	ConformanceExpectationPath   string
+	ManifestPath                 string
+	CoveragePath                 string
+	SimulationPath               string
+	ValidationPath               string
+	ResolvedSHA256               string
+	RuntimeBundleSHA256          string
+	ContextRoutePackSHA256       string
+	ConformanceExpectationSHA256 string
+	ManifestSHA256               string
 }
 
 type ResolvedPolicy struct {
@@ -103,28 +109,53 @@ type ManifestMetadata struct {
 }
 
 type ManifestSpec struct {
-	PolicyRepo         RepoRef               `json:"policy_repo"`
-	EnterpriseRegistry RepoRef               `json:"enterprise_registry"`
-	CoreRegistry       CoreRegistryRef       `json:"core_registry"`
+	KNI                KNIRef                `json:"kni"`
+	Protocol           ProtocolRef           `json:"protocol"`
+	PolicyRepo         PolicyRepoRef         `json:"policy_repo"`
+	EnterpriseRegistry RegistryRef           `json:"enterprise_registry"`
+	CoreRegistry       RegistryRef           `json:"core_registry"`
 	Compiler           CompilerRef           `json:"compiler"`
+	Profile            DigestRef             `json:"profile"`
+	RiskRecipe         DigestRef             `json:"risk_recipe"`
+	CatalogDigest      string                `json:"catalog_digest"`
 	Adapters           map[string]AdapterRef `json:"adapters"`
 	Outputs            map[string]string     `json:"outputs"`
 }
 
-type RepoRef struct {
-	Repo   string `json:"repo"`
-	Commit string `json:"commit"`
+type KNIRef struct {
+	Version string `json:"version"`
 }
 
-type CoreRegistryRef struct {
-	Repo    string `json:"repo"`
+type ProtocolRef struct {
 	Version string `json:"version"`
+}
+
+type PolicyRepoRef struct {
+	Repo           string `json:"repo"`
+	Commit         string `json:"commit"`
+	PolicyFile     string `json:"policy_file"`
+	PolicyFileHash string `json:"policy_file_hash"`
+	ContentDigest  string `json:"content_digest"`
+}
+
+type RegistryRef struct {
+	Repo          string `json:"repo"`
+	Commit        string `json:"commit"`
+	Version       string `json:"version,omitempty"`
+	ContentDigest string `json:"content_digest"`
+}
+
+type DigestRef struct {
+	ID     string `json:"id"`
+	Digest string `json:"digest"`
 }
 
 type CompilerRef struct {
-	Name    string `json:"name"`
-	Version string `json:"version"`
-	Digest  string `json:"digest"`
+	Name         string `json:"name"`
+	Version      string `json:"version"`
+	SourceCommit string `json:"source_commit"`
+	BinaryDigest string `json:"binary_digest"`
+	Digest       string `json:"digest"`
 }
 
 type AdapterRef struct {
@@ -142,6 +173,7 @@ type MeaningCoverageReport struct {
 type SimulationReport struct {
 	Kind        string             `json:"kind"`
 	PolicyID    string             `json:"policy_id"`
+	Status      string             `json:"status"`
 	Simulations []SimulationStatus `json:"simulations"`
 	Findings    []string           `json:"findings"`
 }
@@ -155,7 +187,7 @@ type ValidationResult struct {
 	Kind     string   `json:"kind"`
 	PolicyID string   `json:"policy_id"`
 	Status   string   `json:"status"`
-	Passed   bool     `json:"passed"`
+	Passed   *bool    `json:"passed,omitempty"`
 	Findings []string `json:"findings"`
 }
 

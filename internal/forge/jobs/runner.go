@@ -84,15 +84,21 @@ func (r Runner) runSimulation(ctx context.Context, job *Job) error {
 	policies := make([]SimulationPolicyResult, 0, len(results))
 	for _, result := range results {
 		policies = append(policies, SimulationPolicyResult{
-			PolicyID:       result.PolicyID,
-			ReviewPath:     result.ReviewPath,
-			ResolvedPath:   result.ResolvedPath,
-			ManifestPath:   result.ManifestPath,
-			CoveragePath:   result.CoveragePath,
-			SimulationPath: result.SimulationPath,
-			ValidationPath: result.ValidationPath,
-			ResolvedSHA256: result.ResolvedSHA256,
-			ManifestSHA256: result.ManifestSHA256,
+			PolicyID:                     result.PolicyID,
+			ReviewPath:                   result.ReviewPath,
+			ResolvedPath:                 result.ResolvedPath,
+			RuntimeBundlePath:            result.RuntimeBundlePath,
+			ContextRoutePackPath:         result.ContextRoutePackPath,
+			ConformanceExpectationPath:   result.ConformanceExpectationPath,
+			ManifestPath:                 result.ManifestPath,
+			CoveragePath:                 result.CoveragePath,
+			SimulationPath:               result.SimulationPath,
+			ValidationPath:               result.ValidationPath,
+			ResolvedSHA256:               result.ResolvedSHA256,
+			RuntimeBundleSHA256:          result.RuntimeBundleSHA256,
+			ContextRoutePackSHA256:       result.ContextRoutePackSHA256,
+			ConformanceExpectationSHA256: result.ConformanceExpectationSHA256,
+			ManifestSHA256:               result.ManifestSHA256,
 		})
 	}
 	return job.SetResult(SimulationResult{

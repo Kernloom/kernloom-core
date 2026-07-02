@@ -27,12 +27,26 @@ func TestCompileAccessIntent(t *testing.T) {
 	}
 	for _, path := range []string{
 		filepath.Join(out, "resolved", "access.protect-production-admin-access.resolved.json"),
+		filepath.Join(out, "artifacts", "access.protect-production-admin-access.runtime_bundle.json"),
+		filepath.Join(out, "artifacts", "access.protect-production-admin-access.context_route_pack.json"),
+		filepath.Join(out, "artifacts", "access.protect-production-admin-access.conformance_expectation.json"),
 		filepath.Join(out, "reports", "access.protect-production-admin-access.manifest.json"),
 		filepath.Join(out, "reviews", "access.protect-production-admin-access.intent.review.md"),
 	} {
 		if _, err := os.Stat(path); err != nil {
 			t.Fatalf("expected generated artifact %s: %v", path, err)
 		}
+	}
+	data, err := os.ReadFile(filepath.Join(out, "reports", "access.protect-production-admin-access.validation.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var validation ValidationResult
+	if err := json.Unmarshal(data, &validation); err != nil {
+		t.Fatal(err)
+	}
+	if validation.Status != "not_evaluated" || validation.Passed != nil {
+		t.Fatalf("expected not_evaluated validation without passed field, got %#v", validation)
 	}
 }
 

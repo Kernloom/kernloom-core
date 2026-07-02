@@ -13,7 +13,12 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
+	"github.com/kernloom/kernloom-core/internal/core/artifact"
+	"github.com/kernloom/kernloom-core/internal/core/bundle"
+	"github.com/kernloom/kernloom-core/internal/core/conformance"
+	corecontext "github.com/kernloom/kernloom-core/internal/core/context"
 	"github.com/kernloom/kernloom-core/internal/core/expression"
 	"github.com/kernloom/kernloom-core/internal/core/intent"
 	"github.com/kernloom/kernloom-core/internal/core/registry"
@@ -70,7 +75,13 @@ func compileOne(card *intent.Card, catalog *registry.Catalog, celValidator *expr
 		return Result{}, err
 	}
 	profile, _ := catalog.Profile(card.Profile)
+	riskRecipe, _ := catalog.RiskRecipe(card.RiskRecipe)
 	sourceCommit := gitCommit(opts.PolicyRepo)
+	policyFileHash := fileSHA256(card.SourcePath)
+	coreRegistryDigest := pathSHA256(opts.CoreRegistry)
+	enterpriseRegistryDigest := pathSHA256(opts.EnterpriseRegistry)
+	compilerSourceCommit := gitCommit(".")
+	compilerBinaryDigest := executableSHA256()
 
 	resolved := ResolvedPolicy{
 		Kind: "ResolvedPolicy",
@@ -142,11 +153,41 @@ func compileOne(card *intent.Card, catalog *registry.Catalog, celValidator *expr
 	if err != nil {
 		return Result{}, err
 	}
+	artifactMetadata := artifact.Metadata{
+		PolicyID:     card.ID,
+		KNI:          card.Version,
+		SourcePath:   relativeOrSame(opts.PolicyRepo, card.SourcePath),
+		SourceCommit: sourceCommit,
+		CreatedAt:    time.Now().UTC(),
+		Digests: map[string]string{
+			"policy_file":         policyFileHash,
+			"core_registry":       coreRegistryDigest,
+			"enterprise_registry": enterpriseRegistryDigest,
+			"catalog":             digestJSON(catalog),
+			"profile":             digestJSON(profile),
+			"risk_recipe":         digestJSON(riskRecipe),
+		},
+	}
+	runtimeBundle := runtimeBundleArtifact(card, resolved, artifactMetadata)
+	runtimeBundlePath, runtimeBundleHash, err := writeJSON(filepath.Join(opts.OutputDir, "artifacts", card.ID+".runtime_bundle.json"), runtimeBundle)
+	if err != nil {
+		return Result{}, err
+	}
+	contextRoutePack := contextRoutePackArtifact(card, resolved, artifactMetadata)
+	contextRoutePackPath, contextRoutePackHash, err := writeJSON(filepath.Join(opts.OutputDir, "artifacts", card.ID+".context_route_pack.json"), contextRoutePack)
+	if err != nil {
+		return Result{}, err
+	}
+	conformanceExpectation := conformanceExpectationArtifact(card, resolved, artifactMetadata)
+	conformanceExpectationPath, conformanceExpectationHash, err := writeJSON(filepath.Join(opts.OutputDir, "artifacts", card.ID+".conformance_expectation.json"), conformanceExpectation)
+	if err != nil {
+		return Result{}, err
+	}
 	coverage := MeaningCoverageReport{
 		Kind:     "MeaningCoverageReport",
 		PolicyID: card.ID,
 		Status:   "resolved_only",
-		Message:  "Slice 1 compiler resolved normative authoring values; multi-system meaning coverage has not been evaluated.",
+		Message:  "Compile phase completed catalog resolution and artifact planning; multi-system meaning coverage has not been evaluated.",
 	}
 	coveragePath, coverageHash, err := writeJSON(filepath.Join(opts.OutputDir, "reports", card.ID+".coverage.json"), coverage)
 	if err != nil {
@@ -155,6 +196,7 @@ func compileOne(card *intent.Card, catalog *registry.Catalog, celValidator *expr
 	simulationReport := SimulationReport{
 		Kind:        "SimulationReport",
 		PolicyID:    card.ID,
+		Status:      "resolved_only",
 		Simulations: []SimulationStatus{},
 		Findings:    []string{},
 	}
@@ -172,9 +214,8 @@ func compileOne(card *intent.Card, catalog *registry.Catalog, celValidator *expr
 		Kind:     "ValidationResult",
 		PolicyID: card.ID,
 		Status:   "not_evaluated",
-		Passed:   false,
 		Findings: []string{
-			"Slice 1 performed parser, catalog resolution and CEL validation only; full policy validation is not implemented.",
+			"Compile phase performed parser, catalog resolution, artifact planning and CEL validation only; full policy validation is not implemented.",
 			"Risk recipes are loaded and CEL-checked only; scoring, freshness, confidence and runtime simulation are not evaluated.",
 		},
 	}
@@ -187,16 +228,45 @@ func compileOne(card *intent.Card, catalog *registry.Catalog, celValidator *expr
 		Kind:     "PolicyBuildManifest",
 		Metadata: ManifestMetadata{ID: "build." + card.ID},
 		Spec: ManifestSpec{
-			PolicyRepo:         RepoRef{Repo: filepath.Base(opts.PolicyRepo), Commit: sourceCommit},
-			EnterpriseRegistry: RepoRef{Repo: filepath.Base(opts.EnterpriseRegistry), Commit: gitCommit(opts.EnterpriseRegistry)},
-			CoreRegistry:       CoreRegistryRef{Repo: filepath.Base(opts.CoreRegistry), Version: catalog.CoreVersion},
-			Compiler:           CompilerRef{Name: "forge", Version: version.Version, Digest: sha256String("forge:" + version.Version)},
+			KNI:      KNIRef{Version: card.Version},
+			Protocol: ProtocolRef{Version: "adapter/v1"},
+			PolicyRepo: PolicyRepoRef{
+				Repo:           filepath.Base(opts.PolicyRepo),
+				Commit:         sourceCommit,
+				PolicyFile:     relativeOrSame(opts.PolicyRepo, card.SourcePath),
+				PolicyFileHash: policyFileHash,
+				ContentDigest:  pathSHA256(opts.PolicyRepo),
+			},
+			EnterpriseRegistry: RegistryRef{
+				Repo:          filepath.Base(opts.EnterpriseRegistry),
+				Commit:        gitCommit(opts.EnterpriseRegistry),
+				ContentDigest: enterpriseRegistryDigest,
+			},
+			CoreRegistry: RegistryRef{
+				Repo:          filepath.Base(opts.CoreRegistry),
+				Commit:        gitCommit(opts.CoreRegistry),
+				Version:       catalog.CoreVersion,
+				ContentDigest: coreRegistryDigest,
+			},
+			Compiler: CompilerRef{
+				Name:         "forge",
+				Version:      version.Version,
+				SourceCommit: compilerSourceCommit,
+				BinaryDigest: compilerBinaryDigest,
+				Digest:       digestJSON(map[string]string{"name": "forge", "version": version.Version, "source_commit": compilerSourceCommit, "binary_digest": compilerBinaryDigest}),
+			},
+			Profile:       DigestRef{ID: profile.ID, Digest: digestJSON(profile)},
+			RiskRecipe:    DigestRef{ID: riskRecipe.ID, Digest: digestJSON(riskRecipe)},
+			CatalogDigest: digestJSON(catalog),
 			Adapters: map[string]AdapterRef{
 				"ziti":     {ManifestDigest: "sha256:pending-slice-3", ProtocolVersion: "adapter/v1"},
 				"klshield": {ManifestDigest: "sha256:pending-slice-3", ProtocolVersion: "adapter/v1"},
 			},
 			Outputs: map[string]string{
 				"resolved_policy":         resolvedHash,
+				"runtime_bundle":          runtimeBundleHash,
+				"context_route_pack":      contextRoutePackHash,
+				"conformance_expectation": conformanceExpectationHash,
 				"meaning_coverage_report": coverageHash,
 				"simulation_report":       simulationHash,
 				"validation_result":       validationHash,
@@ -213,15 +283,21 @@ func compileOne(card *intent.Card, catalog *registry.Catalog, celValidator *expr
 	}
 
 	return Result{
-		PolicyID:       card.ID,
-		ReviewPath:     reviewPath,
-		ResolvedPath:   resolvedPath,
-		ManifestPath:   manifestPath,
-		CoveragePath:   coveragePath,
-		SimulationPath: simulationPath,
-		ValidationPath: validationPath,
-		ResolvedSHA256: resolvedHash,
-		ManifestSHA256: manifestHash,
+		PolicyID:                     card.ID,
+		ReviewPath:                   reviewPath,
+		ResolvedPath:                 resolvedPath,
+		RuntimeBundlePath:            runtimeBundlePath,
+		ContextRoutePackPath:         contextRoutePackPath,
+		ConformanceExpectationPath:   conformanceExpectationPath,
+		ManifestPath:                 manifestPath,
+		CoveragePath:                 coveragePath,
+		SimulationPath:               simulationPath,
+		ValidationPath:               validationPath,
+		ResolvedSHA256:               resolvedHash,
+		RuntimeBundleSHA256:          runtimeBundleHash,
+		ContextRoutePackSHA256:       contextRoutePackHash,
+		ConformanceExpectationSHA256: conformanceExpectationHash,
+		ManifestSHA256:               manifestHash,
 	}, nil
 }
 
@@ -362,6 +438,86 @@ func resolveSimulation(simulation intent.Simulation, catalog *registry.Catalog, 
 	return resolved, nil
 }
 
+func runtimeBundleArtifact(card *intent.Card, resolved ResolvedPolicy, metadata artifact.Metadata) bundle.RuntimeBundle {
+	metadata.ID = "runtime_bundle." + card.ID
+	metadata.ArtifactType = "runtime_bundle"
+	actions := make([]bundle.RuntimeAction, 0, len(resolved.Spec.Runtime.Actions))
+	for _, action := range resolved.Spec.Runtime.Actions {
+		actions = append(actions, bundle.RuntimeAction{Label: action.Label, CanonicalID: action.CanonicalID})
+	}
+	return bundle.RuntimeBundle{
+		Kind:     "RuntimeBundle",
+		Metadata: metadata,
+		Spec: bundle.RuntimeBundleSpec{
+			PolicyID:       card.ID,
+			RuntimeAllowed: resolved.Spec.Runtime.Allowed,
+			RuntimeActions: actions,
+			MaxTTL:         resolved.Spec.Runtime.MaxTTL,
+			MaxTTLSource:   resolved.Spec.Runtime.MaxTTLSource,
+			MaxScope:       resolved.Spec.Runtime.MaxScope.Label,
+			MaxScopeSource: resolved.Spec.Runtime.MaxScopeSource,
+		},
+		Status: artifact.PlannedStatus("Runtime execution is not implemented in Slice 2."),
+	}
+}
+
+func contextRoutePackArtifact(card *intent.Card, resolved ResolvedPolicy, metadata artifact.Metadata) corecontext.ContextRoutePack {
+	metadata.ID = "context_route_pack." + card.ID
+	metadata.ArtifactType = "context_route_pack"
+	routes := make([]corecontext.ContextRoute, 0, len(resolved.Spec.Rules))
+	for _, rule := range resolved.Spec.Rules {
+		facts := make([]string, 0, len(rule.Conditions))
+		for _, condition := range rule.Conditions {
+			facts = append(facts, condition.CanonicalID)
+		}
+		routes = append(routes, corecontext.ContextRoute{
+			Name:        rule.Name,
+			Consumers:   []string{resolved.Spec.Target, "forge-simulation"},
+			Facts:       facts,
+			Sensitivity: "planned",
+		})
+	}
+	return corecontext.ContextRoutePack{
+		Kind:     "ContextRoutePack",
+		Metadata: metadata,
+		Spec: corecontext.ContextRoutePackSpec{
+			PolicyID: card.ID,
+			Target:   resolved.Spec.Target,
+			Stage:    resolved.Spec.Stage,
+			Routes:   routes,
+		},
+		Status: artifact.PlannedStatus("Context projection routing is planned only in Slice 2."),
+	}
+}
+
+func conformanceExpectationArtifact(card *intent.Card, resolved ResolvedPolicy, metadata artifact.Metadata) conformance.ConformanceExpectation {
+	metadata.ID = "conformance_expectation." + card.ID
+	metadata.ArtifactType = "conformance_expectation"
+	expectations := make([]conformance.Expectation, 0, len(resolved.Spec.Rules))
+	for _, rule := range resolved.Spec.Rules {
+		expectations = append(expectations, conformance.Expectation{
+			Name:        rule.Name,
+			Description: fmt.Sprintf("Expected effect %q for %q on %q remains unresolved-only until conformance execution exists.", rule.Effect.Label, rule.Action.Label, rule.Resource.Label),
+		})
+	}
+	prohibit := make([]conformance.ProhibitedOutcome, 0, len(resolved.Spec.Prohibit))
+	for _, outcome := range resolved.Spec.Prohibit {
+		prohibit = append(prohibit, conformance.ProhibitedOutcome{Label: outcome.Label, CanonicalID: outcome.CanonicalID})
+	}
+	return conformance.ConformanceExpectation{
+		Kind:     "ConformanceExpectation",
+		Metadata: metadata,
+		Spec: conformance.ConformanceExpectationSpec{
+			PolicyID:     card.ID,
+			Target:       resolved.Spec.Target,
+			Stage:        resolved.Spec.Stage,
+			Expectations: expectations,
+			Prohibit:     prohibit,
+		},
+		Status: artifact.PlannedStatus("Conformance checking is not implemented in Slice 2."),
+	}
+}
+
 func validateCatalogCEL(catalog *registry.Catalog, celValidator *expression.CELValidator) error {
 	for _, value := range catalog.Values {
 		if err := celValidator.Validate(value.CEL); err != nil {
@@ -472,11 +628,14 @@ func writeReview(path string, card *intent.Card, resolved ResolvedPolicy) (strin
 		fmt.Fprintf(&b, "- No simulation examples defined.\n\n")
 	}
 	fmt.Fprintf(&b, "## Reports\n\n")
+	fmt.Fprintf(&b, "- Catalog resolution: `complete`\n")
+	fmt.Fprintf(&b, "- Artifact planning: `complete`\n")
 	fmt.Fprintf(&b, "- Meaning coverage: `resolved_only`\n")
 	fmt.Fprintf(&b, "- Simulation: `resolved_only`\n")
 	fmt.Fprintf(&b, "- Risk recipe evaluation: `not_evaluated`\n")
+	fmt.Fprintf(&b, "- Runtime execution: `not_evaluated`\n")
 	fmt.Fprintf(&b, "- Validation: `not_evaluated`\n\n")
-	fmt.Fprintf(&b, "## Findings\n\nnone blocking during Slice 1 resolution\n")
+	fmt.Fprintf(&b, "## Findings\n\nnone blocking during Slice 2 catalog resolution and artifact planning\n")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return "", err
 	}
@@ -501,6 +660,68 @@ func gitCommit(repo string) string {
 		return "uncommitted"
 	}
 	return strings.TrimSpace(string(out))
+}
+
+func executableSHA256() string {
+	path, err := os.Executable()
+	if err != nil {
+		return sha256String("forge:" + version.Version)
+	}
+	return fileSHA256(path)
+}
+
+func fileSHA256(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "sha256:unavailable"
+	}
+	return sha256Bytes(data)
+}
+
+func pathSHA256(path string) string {
+	var parts []string
+	info, err := os.Stat(path)
+	if err != nil {
+		return "sha256:unavailable"
+	}
+	if !info.IsDir() {
+		return fileSHA256(path)
+	}
+	err = filepath.WalkDir(path, func(current string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			name := entry.Name()
+			if name == ".git" || name == "generated" || name == "bin" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		rel, err := filepath.Rel(path, current)
+		if err != nil {
+			return err
+		}
+		data, err := os.ReadFile(current)
+		if err != nil {
+			return err
+		}
+		parts = append(parts, rel+"\x00"+sha256Bytes(data))
+		return nil
+	})
+	if err != nil {
+		return "sha256:unavailable"
+	}
+	sort.Strings(parts)
+	return sha256String(strings.Join(parts, "\n"))
+}
+
+func digestJSON(value any) string {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return "sha256:unavailable"
+	}
+	return sha256Bytes(data)
 }
 
 func sha256String(value string) string {
