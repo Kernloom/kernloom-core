@@ -1,0 +1,52 @@
+# SPDX-License-Identifier: MPL-2.0
+# Copyright (c) 2026 Kernloom Contributors
+
+services:
+  postgres:
+    image: docker.io/library/postgres:16-alpine
+    container_name: kernloom-postgres
+    environment:
+      POSTGRES_USER: kernloom
+      POSTGRES_PASSWORD: kernloom-dev-password
+      POSTGRES_DB: kernloom
+    ports:
+      - "5432:5432"
+    volumes:
+      - kernloom-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kernloom -d kernloom"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: docker.io/library/redis:7-alpine
+    container_name: kernloom-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - kernloom-redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  minio:
+    image: quay.io/minio/minio:latest
+    container_name: kernloom-minio
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: kernloom
+      MINIO_ROOT_PASSWORD: kernloom-dev-password
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - kernloom-minio:/data
+
+volumes:
+  kernloom-postgres:
+  kernloom-redis:
+  kernloom-minio:
+

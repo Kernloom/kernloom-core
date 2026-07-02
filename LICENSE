@@ -1,0 +1,10 @@
+Kernloom Forge is licensed under the Mozilla Public License 2.0 (MPL-2.0).
+
+All Go source files carry an SPDX-License-Identifier header:
+  SPDX-License-Identifier: MPL-2.0
+
+YAML registry files, schema files and examples are provided under the same license.
+
+Full license text: LICENSES/MPL-2.0.txt
+
+SPDX identifiers in file headers take precedence over this summary.
