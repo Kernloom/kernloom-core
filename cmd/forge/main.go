@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/kernloom/kernloom-core/internal/api/authn"
 	"github.com/kernloom/kernloom-core/internal/core/version"
@@ -29,7 +30,7 @@ func main() {
 		return
 	}
 	fmt.Println(version.Binary("forge"))
-	fmt.Println("usage: forge compile [--policy-repo path] [--policy-file path] [--core-registry path] [--enterprise-registry path] [--output-dir path]")
+	fmt.Println("usage: forge compile [--policy-repo path] [--policy-file path] [--core-registry path] [--enterprise-registry path] [--output-dir path] [--artifact-store-root path] [--signing dev-local|none]")
 	fmt.Println("usage: forge api [--addr :8080] [--queue redis|memory] [--redis-addr 127.0.0.1:6379]")
 }
 
@@ -41,6 +42,13 @@ func compile(args []string) {
 	fs.StringVar(&opts.CoreRegistry, "core-registry", "../kernloom-core-registry", "path to core registry repository")
 	fs.StringVar(&opts.EnterpriseRegistry, "enterprise-registry", "../enterprise-kernloom-registry", "path to enterprise registry repository")
 	fs.StringVar(&opts.OutputDir, "output-dir", "", "output directory; defaults to policy repo generated directory")
+	fs.StringVar(&opts.ArtifactStoreRoot, "artifact-store-root", "", "fs artifact store root; defaults to output dir artifact-store")
+	fs.StringVar(&opts.ArtifactStoreOrg, "artifact-store-org", "kernloom", "artifact store organization path segment")
+	fs.StringVar(&opts.ArtifactStoreEnvironment, "artifact-store-env", "dev", "artifact store environment path segment")
+	fs.StringVar(&opts.SigningMode, "signing", compiler.SigningModeDevLocal, "artifact signing mode: dev-local or none")
+	fs.StringVar(&opts.SigningKeyPath, "signing-key", "", "dev-local signing key path; defaults to output dir keys/dev-local.ed25519.json")
+	fs.StringVar(&opts.SigningKeyID, "signing-key-id", "dev-local", "key id to place in signed envelopes")
+	fs.DurationVar(&opts.SignatureTTL, "signature-ttl", 24*time.Hour, "signed artifact validity duration")
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
@@ -54,6 +62,10 @@ func compile(args []string) {
 		fmt.Printf("%s\n", result.PolicyID)
 		fmt.Printf("  review: %s\n", result.ReviewPath)
 		fmt.Printf("  resolved: %s\n", result.ResolvedPath)
+		fmt.Printf("  runtime_bundle: %s\n", result.RuntimeBundlePath)
+		if result.RuntimeBundleSignedPath != "" {
+			fmt.Printf("  signed_runtime_bundle: %s\n", result.RuntimeBundleSignedPath)
+		}
 		fmt.Printf("  manifest: %s\n", result.ManifestPath)
 	}
 }

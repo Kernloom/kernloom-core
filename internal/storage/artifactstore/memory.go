@@ -4,6 +4,7 @@
 package artifactstore
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"sync"
@@ -26,7 +27,10 @@ func (s *MemoryStore) Put(_ context.Context, art artifact.Artifact) (artifact.Re
 	hash := sha256Bytes(art.Payload)
 	uri := "memory://" + art.Metadata.ArtifactType + "/" + art.Metadata.ID + "-" + hash[7:] + ".json"
 	if _, exists := s.objects[uri]; exists {
-		return artifact.Ref{}, fmt.Errorf("artifact already exists: %s", uri)
+		if bytes.Equal(s.objects[uri], art.Payload) {
+			return artifact.Ref{URI: uri, SHA256: hash}, nil
+		}
+		return artifact.Ref{}, fmt.Errorf("artifact already exists with different content: %s", uri)
 	}
 	s.objects[uri] = append([]byte(nil), art.Payload...)
 	return artifact.Ref{URI: uri, SHA256: hash}, nil
@@ -43,4 +47,9 @@ func (s *MemoryStore) Get(_ context.Context, ref artifact.Ref) ([]byte, error) {
 		return nil, fmt.Errorf("artifact hash mismatch for %s", ref.URI)
 	}
 	return append([]byte(nil), data...), nil
+}
+
+func (s *MemoryStore) Verify(ctx context.Context, ref artifact.Ref) error {
+	_, err := s.Get(ctx, ref)
+	return err
 }

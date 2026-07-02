@@ -62,21 +62,29 @@ type SimulationResult struct {
 }
 
 type SimulationPolicyResult struct {
-	PolicyID                     string `json:"policy_id"`
-	ReviewPath                   string `json:"review_path"`
-	ResolvedPath                 string `json:"resolved_path"`
-	RuntimeBundlePath            string `json:"runtime_bundle_path"`
-	ContextRoutePackPath         string `json:"context_route_pack_path"`
-	ConformanceExpectationPath   string `json:"conformance_expectation_path"`
-	ManifestPath                 string `json:"manifest_path"`
-	CoveragePath                 string `json:"coverage_path"`
-	SimulationPath               string `json:"simulation_path"`
-	ValidationPath               string `json:"validation_path"`
-	ResolvedSHA256               string `json:"resolved_sha256"`
-	RuntimeBundleSHA256          string `json:"runtime_bundle_sha256"`
-	ContextRoutePackSHA256       string `json:"context_route_pack_sha256"`
-	ConformanceExpectationSHA256 string `json:"conformance_expectation_sha256"`
-	ManifestSHA256               string `json:"manifest_sha256"`
+	PolicyID                           string `json:"policy_id"`
+	ReviewPath                         string `json:"review_path"`
+	ResolvedPath                       string `json:"resolved_path"`
+	RuntimeBundlePath                  string `json:"runtime_bundle_path"`
+	ContextRoutePackPath               string `json:"context_route_pack_path"`
+	ConformanceExpectationPath         string `json:"conformance_expectation_path"`
+	ManifestPath                       string `json:"manifest_path"`
+	CoveragePath                       string `json:"coverage_path"`
+	SimulationPath                     string `json:"simulation_path"`
+	ValidationPath                     string `json:"validation_path"`
+	ResolvedSignedPath                 string `json:"resolved_signed_path,omitempty"`
+	RuntimeBundleSignedPath            string `json:"runtime_bundle_signed_path,omitempty"`
+	ContextRoutePackSignedPath         string `json:"context_route_pack_signed_path,omitempty"`
+	ConformanceExpectationSignedPath   string `json:"conformance_expectation_signed_path,omitempty"`
+	ResolvedSHA256                     string `json:"resolved_sha256"`
+	RuntimeBundleSHA256                string `json:"runtime_bundle_sha256"`
+	ContextRoutePackSHA256             string `json:"context_route_pack_sha256"`
+	ConformanceExpectationSHA256       string `json:"conformance_expectation_sha256"`
+	ManifestSHA256                     string `json:"manifest_sha256"`
+	ResolvedSignedSHA256               string `json:"resolved_signed_sha256,omitempty"`
+	RuntimeBundleSignedSHA256          string `json:"runtime_bundle_signed_sha256,omitempty"`
+	ContextRoutePackSignedSHA256       string `json:"context_route_pack_signed_sha256,omitempty"`
+	ConformanceExpectationSignedSHA256 string `json:"conformance_expectation_signed_sha256,omitempty"`
 }
 
 func NewJob(jobType, createdBy string, payload any) (*Job, error) {

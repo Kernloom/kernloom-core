@@ -14,6 +14,7 @@ import (
 type ArtifactStore interface {
 	Put(ctx context.Context, artifact artifact.Artifact) (artifact.Ref, error)
 	Get(ctx context.Context, ref artifact.Ref) ([]byte, error)
+	Verify(ctx context.Context, ref artifact.Ref) error
 }
 
 func sha256Bytes(data []byte) string {

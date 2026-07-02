@@ -4,6 +4,7 @@
 package compiler
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -22,7 +23,14 @@ import (
 	"github.com/kernloom/kernloom-core/internal/core/expression"
 	"github.com/kernloom/kernloom-core/internal/core/intent"
 	"github.com/kernloom/kernloom-core/internal/core/registry"
+	"github.com/kernloom/kernloom-core/internal/core/signing"
 	"github.com/kernloom/kernloom-core/internal/core/version"
+	"github.com/kernloom/kernloom-core/internal/storage/artifactstore"
+)
+
+const (
+	SigningModeNone     = "none"
+	SigningModeDevLocal = "dev-local"
 )
 
 func Compile(opts Options) ([]Result, error) {
@@ -37,6 +45,10 @@ func Compile(opts Options) ([]Result, error) {
 	}
 	if opts.OutputDir == "" {
 		opts.OutputDir = filepath.Join(opts.PolicyRepo, "generated")
+	}
+	services, err := compileServices(opts)
+	if err != nil {
+		return nil, err
 	}
 
 	catalog, err := registry.Load(opts.CoreRegistry, opts.EnterpriseRegistry)
@@ -61,7 +73,7 @@ func Compile(opts Options) ([]Result, error) {
 		if err != nil {
 			return nil, err
 		}
-		result, err := compileOne(card, catalog, celValidator, opts)
+		result, err := compileOne(context.Background(), card, catalog, celValidator, opts, services)
 		if err != nil {
 			return nil, err
 		}
@@ -70,7 +82,60 @@ func Compile(opts Options) ([]Result, error) {
 	return results, nil
 }
 
-func compileOne(card *intent.Card, catalog *registry.Catalog, celValidator *expression.CELValidator, opts Options) (Result, error) {
+type compileRuntime struct {
+	ArtifactStore artifactstore.ArtifactStore
+	Signer        signing.Signer
+	ExpiresAt     *time.Time
+}
+
+func compileServices(opts Options) (compileRuntime, error) {
+	store := opts.ArtifactStore
+	if store == nil {
+		root := opts.ArtifactStoreRoot
+		if root == "" {
+			root = filepath.Join(opts.OutputDir, "artifact-store")
+		}
+		store = artifactstore.NewFSStore(root, valueOrDefault(opts.ArtifactStoreOrg, "kernloom"), valueOrDefault(opts.ArtifactStoreEnvironment, "dev"))
+	}
+
+	mode := opts.SigningMode
+	if mode == "" {
+		mode = SigningModeDevLocal
+	}
+	mode = strings.ToLower(mode)
+	if mode == SigningModeNone {
+		return compileRuntime{ArtifactStore: store}, nil
+	}
+	ttl := opts.SignatureTTL
+	if ttl == 0 {
+		ttl = 24 * time.Hour
+	}
+	now := time.Now().UTC()
+	if opts.Now != nil {
+		now = opts.Now().UTC()
+	}
+	expiresAt := now.Add(ttl)
+	signer := opts.Signer
+	switch mode {
+	case SigningModeDevLocal:
+		if signer == nil {
+			keyPath := opts.SigningKeyPath
+			if keyPath == "" {
+				keyPath = filepath.Join(opts.OutputDir, "keys", "dev-local.ed25519.json")
+			}
+			devSigner, err := signing.LoadOrCreateDevLocalSigner(keyPath, valueOrDefault(opts.SigningKeyID, "dev-local"))
+			if err != nil {
+				return compileRuntime{}, err
+			}
+			signer = devSigner
+		}
+	default:
+		return compileRuntime{}, fmt.Errorf("unsupported signing mode %q", opts.SigningMode)
+	}
+	return compileRuntime{ArtifactStore: store, Signer: signer, ExpiresAt: &expiresAt}, nil
+}
+
+func compileOne(ctx context.Context, card *intent.Card, catalog *registry.Catalog, celValidator *expression.CELValidator, opts Options, services compileRuntime) (Result, error) {
 	if err := validateMetadata(card, catalog); err != nil {
 		return Result{}, err
 	}
@@ -149,10 +214,6 @@ func compileOne(card *intent.Card, catalog *registry.Catalog, celValidator *expr
 		resolved.Spec.Simulations = append(resolved.Spec.Simulations, resolvedSimulation)
 	}
 
-	resolvedPath, resolvedHash, err := writeJSON(filepath.Join(opts.OutputDir, "resolved", card.ID+".resolved.json"), resolved)
-	if err != nil {
-		return Result{}, err
-	}
 	artifactMetadata := artifact.Metadata{
 		PolicyID:     card.ID,
 		KNI:          card.Version,
@@ -168,18 +229,26 @@ func compileOne(card *intent.Card, catalog *registry.Catalog, celValidator *expr
 			"risk_recipe":         digestJSON(riskRecipe),
 		},
 	}
+
+	resolvedMetadata := artifactMetadata
+	resolvedMetadata.ID = resolved.Metadata.ID
+	resolvedMetadata.ArtifactType = "resolved_policy"
+	resolvedOutput, err := emitJSONArtifact(ctx, filepath.Join(opts.OutputDir, "resolved", card.ID+".resolved.json"), resolved, resolvedMetadata, services, opts)
+	if err != nil {
+		return Result{}, err
+	}
 	runtimeBundle := runtimeBundleArtifact(card, resolved, artifactMetadata)
-	runtimeBundlePath, runtimeBundleHash, err := writeJSON(filepath.Join(opts.OutputDir, "artifacts", card.ID+".runtime_bundle.json"), runtimeBundle)
+	runtimeBundleOutput, err := emitJSONArtifact(ctx, filepath.Join(opts.OutputDir, "artifacts", card.ID+".runtime_bundle.json"), runtimeBundle, runtimeBundle.Metadata, services, opts)
 	if err != nil {
 		return Result{}, err
 	}
 	contextRoutePack := contextRoutePackArtifact(card, resolved, artifactMetadata)
-	contextRoutePackPath, contextRoutePackHash, err := writeJSON(filepath.Join(opts.OutputDir, "artifacts", card.ID+".context_route_pack.json"), contextRoutePack)
+	contextRoutePackOutput, err := emitJSONArtifact(ctx, filepath.Join(opts.OutputDir, "artifacts", card.ID+".context_route_pack.json"), contextRoutePack, contextRoutePack.Metadata, services, opts)
 	if err != nil {
 		return Result{}, err
 	}
 	conformanceExpectation := conformanceExpectationArtifact(card, resolved, artifactMetadata)
-	conformanceExpectationPath, conformanceExpectationHash, err := writeJSON(filepath.Join(opts.OutputDir, "artifacts", card.ID+".conformance_expectation.json"), conformanceExpectation)
+	conformanceExpectationOutput, err := emitJSONArtifact(ctx, filepath.Join(opts.OutputDir, "artifacts", card.ID+".conformance_expectation.json"), conformanceExpectation, conformanceExpectation.Metadata, services, opts)
 	if err != nil {
 		return Result{}, err
 	}
@@ -263,14 +332,26 @@ func compileOne(card *intent.Card, catalog *registry.Catalog, celValidator *expr
 				"klshield": {ManifestDigest: "sha256:pending-slice-3", ProtocolVersion: "adapter/v1"},
 			},
 			Outputs: map[string]string{
-				"resolved_policy":         resolvedHash,
-				"runtime_bundle":          runtimeBundleHash,
-				"context_route_pack":      contextRoutePackHash,
-				"conformance_expectation": conformanceExpectationHash,
+				"resolved_policy":         resolvedOutput.SHA256,
+				"runtime_bundle":          runtimeBundleOutput.SHA256,
+				"context_route_pack":      contextRoutePackOutput.SHA256,
+				"conformance_expectation": conformanceExpectationOutput.SHA256,
 				"meaning_coverage_report": coverageHash,
 				"simulation_report":       simulationHash,
 				"validation_result":       validationHash,
 			},
+			ArtifactRefs: map[string]artifact.Ref{
+				"resolved_policy":         resolvedOutput.Ref,
+				"runtime_bundle":          runtimeBundleOutput.Ref,
+				"context_route_pack":      contextRoutePackOutput.Ref,
+				"conformance_expectation": conformanceExpectationOutput.Ref,
+			},
+			SignedOutputs: signedOutputs(map[string]emittedArtifact{
+				"resolved_policy":         resolvedOutput,
+				"runtime_bundle":          runtimeBundleOutput,
+				"context_route_pack":      contextRoutePackOutput,
+				"conformance_expectation": conformanceExpectationOutput,
+			}),
 		},
 	}
 	manifestPath, manifestHash, err := writeJSON(filepath.Join(opts.OutputDir, "reports", card.ID+".manifest.json"), manifest)
@@ -283,21 +364,37 @@ func compileOne(card *intent.Card, catalog *registry.Catalog, celValidator *expr
 	}
 
 	return Result{
-		PolicyID:                     card.ID,
-		ReviewPath:                   reviewPath,
-		ResolvedPath:                 resolvedPath,
-		RuntimeBundlePath:            runtimeBundlePath,
-		ContextRoutePackPath:         contextRoutePackPath,
-		ConformanceExpectationPath:   conformanceExpectationPath,
-		ManifestPath:                 manifestPath,
-		CoveragePath:                 coveragePath,
-		SimulationPath:               simulationPath,
-		ValidationPath:               validationPath,
-		ResolvedSHA256:               resolvedHash,
-		RuntimeBundleSHA256:          runtimeBundleHash,
-		ContextRoutePackSHA256:       contextRoutePackHash,
-		ConformanceExpectationSHA256: conformanceExpectationHash,
-		ManifestSHA256:               manifestHash,
+		PolicyID:                                card.ID,
+		ReviewPath:                              reviewPath,
+		ResolvedPath:                            resolvedOutput.Path,
+		RuntimeBundlePath:                       runtimeBundleOutput.Path,
+		ContextRoutePackPath:                    contextRoutePackOutput.Path,
+		ConformanceExpectationPath:              conformanceExpectationOutput.Path,
+		ManifestPath:                            manifestPath,
+		CoveragePath:                            coveragePath,
+		SimulationPath:                          simulationPath,
+		ValidationPath:                          validationPath,
+		ResolvedSignedPath:                      resolvedOutput.SignedPath,
+		RuntimeBundleSignedPath:                 runtimeBundleOutput.SignedPath,
+		ContextRoutePackSignedPath:              contextRoutePackOutput.SignedPath,
+		ConformanceExpectationSignedPath:        conformanceExpectationOutput.SignedPath,
+		ResolvedSHA256:                          resolvedOutput.SHA256,
+		RuntimeBundleSHA256:                     runtimeBundleOutput.SHA256,
+		ContextRoutePackSHA256:                  contextRoutePackOutput.SHA256,
+		ConformanceExpectationSHA256:            conformanceExpectationOutput.SHA256,
+		ManifestSHA256:                          manifestHash,
+		ResolvedSignedSHA256:                    resolvedOutput.SignedSHA256,
+		RuntimeBundleSignedSHA256:               runtimeBundleOutput.SignedSHA256,
+		ContextRoutePackSignedSHA256:            contextRoutePackOutput.SignedSHA256,
+		ConformanceExpectationSignedSHA256:      conformanceExpectationOutput.SignedSHA256,
+		ResolvedArtifactRef:                     resolvedOutput.Ref,
+		RuntimeBundleArtifactRef:                runtimeBundleOutput.Ref,
+		ContextRoutePackArtifactRef:             contextRoutePackOutput.Ref,
+		ConformanceExpectationArtifactRef:       conformanceExpectationOutput.Ref,
+		ResolvedSignedArtifactRef:               resolvedOutput.SignedRef,
+		RuntimeBundleSignedArtifactRef:          runtimeBundleOutput.SignedRef,
+		ContextRoutePackSignedArtifactRef:       contextRoutePackOutput.SignedRef,
+		ConformanceExpectationSignedArtifactRef: conformanceExpectationOutput.SignedRef,
 	}, nil
 }
 
@@ -556,19 +653,95 @@ func intentFiles(opts Options) ([]string, error) {
 	return files, err
 }
 
+type emittedArtifact struct {
+	Path         string
+	SHA256       string
+	Ref          artifact.Ref
+	SignedPath   string
+	SignedSHA256 string
+	SignedRef    artifact.Ref
+	Envelope     signing.SignedEnvelope
+}
+
+func emitJSONArtifact(ctx context.Context, path string, value any, metadata artifact.Metadata, services compileRuntime, opts Options) (emittedArtifact, error) {
+	writtenPath, hash, payload, err := writeJSONPayload(path, value)
+	if err != nil {
+		return emittedArtifact{}, err
+	}
+	ref, err := services.ArtifactStore.Put(ctx, artifact.Artifact{Metadata: metadata, Payload: payload})
+	if err != nil {
+		return emittedArtifact{}, err
+	}
+	output := emittedArtifact{Path: writtenPath, SHA256: hash, Ref: ref}
+	if services.Signer == nil {
+		return output, nil
+	}
+	envelope, err := services.Signer.Sign(ctx, payload, signing.Metadata{
+		KeyID:        opts.SigningKeyID,
+		PolicyID:     metadata.PolicyID,
+		SourceCommit: metadata.SourceCommit,
+		ExpiresAt:    services.ExpiresAt,
+	})
+	if err != nil {
+		return emittedArtifact{}, err
+	}
+	signedPath := filepath.Join(opts.OutputDir, "signed", metadata.PolicyID+"."+metadata.ArtifactType+".signed.json")
+	writtenSignedPath, signedHash, signedPayload, err := writeJSONPayload(signedPath, envelope)
+	if err != nil {
+		return emittedArtifact{}, err
+	}
+	signedMetadata := metadata
+	signedMetadata.ID = "signed." + metadata.ID
+	signedMetadata.ArtifactType = metadata.ArtifactType + "_signed_envelope"
+	signedRef, err := services.ArtifactStore.Put(ctx, artifact.Artifact{Metadata: signedMetadata, Payload: signedPayload})
+	if err != nil {
+		return emittedArtifact{}, err
+	}
+	output.SignedPath = writtenSignedPath
+	output.SignedSHA256 = signedHash
+	output.SignedRef = signedRef
+	output.Envelope = envelope
+	return output, nil
+}
+
+func signedOutputs(outputs map[string]emittedArtifact) map[string]SignedOutputRef {
+	signed := map[string]SignedOutputRef{}
+	for name, output := range outputs {
+		if output.SignedPath == "" {
+			continue
+		}
+		signed[name] = SignedOutputRef{
+			Path:           output.SignedPath,
+			ArtifactRef:    output.SignedRef,
+			EnvelopeSHA256: output.SignedSHA256,
+			PayloadSHA256:  output.Envelope.PayloadSHA256,
+			KeyID:          output.Envelope.KeyID,
+		}
+	}
+	if len(signed) == 0 {
+		return nil
+	}
+	return signed
+}
+
 func writeJSON(path string, value any) (string, string, error) {
+	path, hash, _, err := writeJSONPayload(path, value)
+	return path, hash, err
+}
+
+func writeJSONPayload(path string, value any) (string, string, []byte, error) {
 	data, err := json.MarshalIndent(value, "", "  ")
 	if err != nil {
-		return "", "", err
+		return "", "", nil, err
 	}
 	data = append(data, '\n')
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return "", "", err
+		return "", "", nil, err
 	}
 	if err := os.WriteFile(path, data, 0o644); err != nil {
-		return "", "", err
+		return "", "", nil, err
 	}
-	return path, sha256Bytes(data), nil
+	return path, sha256Bytes(data), data, nil
 }
 
 func writeReview(path string, card *intent.Card, resolved ResolvedPolicy) (string, error) {
@@ -629,13 +802,14 @@ func writeReview(path string, card *intent.Card, resolved ResolvedPolicy) (strin
 	}
 	fmt.Fprintf(&b, "## Reports\n\n")
 	fmt.Fprintf(&b, "- Catalog resolution: `complete`\n")
-	fmt.Fprintf(&b, "- Artifact planning: `complete`\n")
+	fmt.Fprintf(&b, "- Artifact storage: `complete`\n")
+	fmt.Fprintf(&b, "- Artifact signing: `configured`\n")
 	fmt.Fprintf(&b, "- Meaning coverage: `resolved_only`\n")
 	fmt.Fprintf(&b, "- Simulation: `resolved_only`\n")
 	fmt.Fprintf(&b, "- Risk recipe evaluation: `not_evaluated`\n")
 	fmt.Fprintf(&b, "- Runtime execution: `not_evaluated`\n")
 	fmt.Fprintf(&b, "- Validation: `not_evaluated`\n\n")
-	fmt.Fprintf(&b, "## Findings\n\nnone blocking during Slice 2 catalog resolution and artifact planning\n")
+	fmt.Fprintf(&b, "## Findings\n\nnone blocking during Slice 3 artifact storage and signing\n")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return "", err
 	}
@@ -731,4 +905,11 @@ func sha256String(value string) string {
 func sha256Bytes(data []byte) string {
 	sum := sha256.Sum256(data)
 	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+func valueOrDefault(value, fallback string) string {
+	if value == "" {
+		return fallback
+	}
+	return value
 }

@@ -4,10 +4,14 @@
 package compiler
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/kernloom/kernloom-core/internal/core/signing"
+	kliqbundle "github.com/kernloom/kernloom-core/internal/kliq/bundle"
 )
 
 func TestCompileAccessIntent(t *testing.T) {
@@ -30,6 +34,9 @@ func TestCompileAccessIntent(t *testing.T) {
 		filepath.Join(out, "artifacts", "access.protect-production-admin-access.runtime_bundle.json"),
 		filepath.Join(out, "artifacts", "access.protect-production-admin-access.context_route_pack.json"),
 		filepath.Join(out, "artifacts", "access.protect-production-admin-access.conformance_expectation.json"),
+		filepath.Join(out, "signed", "access.protect-production-admin-access.runtime_bundle.signed.json"),
+		filepath.Join(out, "signed", "access.protect-production-admin-access.context_route_pack.signed.json"),
+		filepath.Join(out, "signed", "access.protect-production-admin-access.conformance_expectation.signed.json"),
 		filepath.Join(out, "reports", "access.protect-production-admin-access.manifest.json"),
 		filepath.Join(out, "reviews", "access.protect-production-admin-access.intent.review.md"),
 	} {
@@ -47,6 +54,27 @@ func TestCompileAccessIntent(t *testing.T) {
 	}
 	if validation.Status != "not_evaluated" || validation.Passed != nil {
 		t.Fatalf("expected not_evaluated validation without passed field, got %#v", validation)
+	}
+	manifestData, err := os.ReadFile(filepath.Join(out, "reports", "access.protect-production-admin-access.manifest.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest PolicyBuildManifest
+	if err := json.Unmarshal(manifestData, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	if manifest.Spec.ArtifactRefs["runtime_bundle"].URI == "" {
+		t.Fatalf("expected runtime bundle artifact ref in manifest, got %#v", manifest.Spec.ArtifactRefs)
+	}
+	if manifest.Spec.SignedOutputs["runtime_bundle"].ArtifactRef.URI == "" {
+		t.Fatalf("expected signed runtime bundle ref in manifest, got %#v", manifest.Spec.SignedOutputs)
+	}
+	verifier, err := signing.LoadDevLocalVerifier(filepath.Join(out, "keys", "dev-local.ed25519.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := kliqbundle.LoadSignedRuntimeBundle(context.Background(), results[0].RuntimeBundleSignedPath, verifier); err != nil {
+		t.Fatal(err)
 	}
 }
 

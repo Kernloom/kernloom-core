@@ -13,15 +13,26 @@ import (
 
 func TestMemoryStorePutGet(t *testing.T) {
 	store := NewMemoryStore()
-	ref, err := store.Put(context.Background(), artifact.Artifact{
+	art := artifact.Artifact{
 		Metadata: artifact.Metadata{
 			ID:           "artifact.test",
 			ArtifactType: "resolved_policy",
 			CreatedAt:    time.Now().UTC(),
 		},
 		Payload: []byte(`{"kind":"Test"}`),
-	})
+	}
+	ref, err := store.Put(context.Background(), art)
 	if err != nil {
+		t.Fatal(err)
+	}
+	secondRef, err := store.Put(context.Background(), art)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secondRef != ref {
+		t.Fatalf("expected idempotent put to return same ref, got %#v and %#v", ref, secondRef)
+	}
+	if err := store.Verify(context.Background(), ref); err != nil {
 		t.Fatal(err)
 	}
 	data, err := store.Get(context.Background(), ref)
@@ -35,7 +46,7 @@ func TestMemoryStorePutGet(t *testing.T) {
 
 func TestFSStorePutGet(t *testing.T) {
 	store := NewFSStore(t.TempDir(), "acme", "dev")
-	ref, err := store.Put(context.Background(), artifact.Artifact{
+	art := artifact.Artifact{
 		Metadata: artifact.Metadata{
 			ID:           "artifact.test",
 			ArtifactType: "runtime_bundle",
@@ -43,8 +54,19 @@ func TestFSStorePutGet(t *testing.T) {
 			CreatedAt:    time.Now().UTC(),
 		},
 		Payload: []byte(`{"kind":"RuntimeBundle"}`),
-	})
+	}
+	ref, err := store.Put(context.Background(), art)
 	if err != nil {
+		t.Fatal(err)
+	}
+	secondRef, err := store.Put(context.Background(), art)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secondRef != ref {
+		t.Fatalf("expected idempotent put to return same ref, got %#v and %#v", ref, secondRef)
+	}
+	if err := store.Verify(context.Background(), ref); err != nil {
 		t.Fatal(err)
 	}
 	data, err := store.Get(context.Background(), ref)

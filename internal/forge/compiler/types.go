@@ -3,32 +3,65 @@
 
 package compiler
 
-import "github.com/kernloom/kernloom-core/internal/core/registry"
+import (
+	"time"
+
+	coreartifact "github.com/kernloom/kernloom-core/internal/core/artifact"
+	"github.com/kernloom/kernloom-core/internal/core/registry"
+	"github.com/kernloom/kernloom-core/internal/core/signing"
+	"github.com/kernloom/kernloom-core/internal/storage/artifactstore"
+)
 
 type Options struct {
-	PolicyRepo         string
-	PolicyFile         string
-	CoreRegistry       string
-	EnterpriseRegistry string
-	OutputDir          string
+	PolicyRepo               string
+	PolicyFile               string
+	CoreRegistry             string
+	EnterpriseRegistry       string
+	OutputDir                string
+	ArtifactStoreRoot        string
+	ArtifactStoreOrg         string
+	ArtifactStoreEnvironment string
+	ArtifactStore            artifactstore.ArtifactStore
+	SigningMode              string
+	SigningKeyPath           string
+	SigningKeyID             string
+	SignatureTTL             time.Duration
+	Signer                   signing.Signer
+	Now                      func() time.Time
 }
 
 type Result struct {
-	PolicyID                     string
-	ReviewPath                   string
-	ResolvedPath                 string
-	RuntimeBundlePath            string
-	ContextRoutePackPath         string
-	ConformanceExpectationPath   string
-	ManifestPath                 string
-	CoveragePath                 string
-	SimulationPath               string
-	ValidationPath               string
-	ResolvedSHA256               string
-	RuntimeBundleSHA256          string
-	ContextRoutePackSHA256       string
-	ConformanceExpectationSHA256 string
-	ManifestSHA256               string
+	PolicyID                                string
+	ReviewPath                              string
+	ResolvedPath                            string
+	RuntimeBundlePath                       string
+	ContextRoutePackPath                    string
+	ConformanceExpectationPath              string
+	ManifestPath                            string
+	CoveragePath                            string
+	SimulationPath                          string
+	ValidationPath                          string
+	ResolvedSignedPath                      string
+	RuntimeBundleSignedPath                 string
+	ContextRoutePackSignedPath              string
+	ConformanceExpectationSignedPath        string
+	ResolvedSHA256                          string
+	RuntimeBundleSHA256                     string
+	ContextRoutePackSHA256                  string
+	ConformanceExpectationSHA256            string
+	ManifestSHA256                          string
+	ResolvedSignedSHA256                    string
+	RuntimeBundleSignedSHA256               string
+	ContextRoutePackSignedSHA256            string
+	ConformanceExpectationSignedSHA256      string
+	ResolvedArtifactRef                     coreartifact.Ref
+	RuntimeBundleArtifactRef                coreartifact.Ref
+	ContextRoutePackArtifactRef             coreartifact.Ref
+	ConformanceExpectationArtifactRef       coreartifact.Ref
+	ResolvedSignedArtifactRef               coreartifact.Ref
+	RuntimeBundleSignedArtifactRef          coreartifact.Ref
+	ContextRoutePackSignedArtifactRef       coreartifact.Ref
+	ConformanceExpectationSignedArtifactRef coreartifact.Ref
 }
 
 type ResolvedPolicy struct {
@@ -109,17 +142,19 @@ type ManifestMetadata struct {
 }
 
 type ManifestSpec struct {
-	KNI                KNIRef                `json:"kni"`
-	Protocol           ProtocolRef           `json:"protocol"`
-	PolicyRepo         PolicyRepoRef         `json:"policy_repo"`
-	EnterpriseRegistry RegistryRef           `json:"enterprise_registry"`
-	CoreRegistry       RegistryRef           `json:"core_registry"`
-	Compiler           CompilerRef           `json:"compiler"`
-	Profile            DigestRef             `json:"profile"`
-	RiskRecipe         DigestRef             `json:"risk_recipe"`
-	CatalogDigest      string                `json:"catalog_digest"`
-	Adapters           map[string]AdapterRef `json:"adapters"`
-	Outputs            map[string]string     `json:"outputs"`
+	KNI                KNIRef                      `json:"kni"`
+	Protocol           ProtocolRef                 `json:"protocol"`
+	PolicyRepo         PolicyRepoRef               `json:"policy_repo"`
+	EnterpriseRegistry RegistryRef                 `json:"enterprise_registry"`
+	CoreRegistry       RegistryRef                 `json:"core_registry"`
+	Compiler           CompilerRef                 `json:"compiler"`
+	Profile            DigestRef                   `json:"profile"`
+	RiskRecipe         DigestRef                   `json:"risk_recipe"`
+	CatalogDigest      string                      `json:"catalog_digest"`
+	Adapters           map[string]AdapterRef       `json:"adapters"`
+	Outputs            map[string]string           `json:"outputs"`
+	ArtifactRefs       map[string]coreartifact.Ref `json:"artifact_refs,omitempty"`
+	SignedOutputs      map[string]SignedOutputRef  `json:"signed_outputs,omitempty"`
 }
 
 type KNIRef struct {
@@ -161,6 +196,14 @@ type CompilerRef struct {
 type AdapterRef struct {
 	ManifestDigest  string `json:"manifest_digest"`
 	ProtocolVersion string `json:"protocol_version"`
+}
+
+type SignedOutputRef struct {
+	Path           string           `json:"path,omitempty"`
+	ArtifactRef    coreartifact.Ref `json:"artifact_ref"`
+	EnvelopeSHA256 string           `json:"envelope_sha256"`
+	PayloadSHA256  string           `json:"payload_sha256"`
+	KeyID          string           `json:"key_id"`
 }
 
 type MeaningCoverageReport struct {

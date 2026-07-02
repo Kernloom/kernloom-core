@@ -9,6 +9,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"time"
 )
 
@@ -65,6 +66,9 @@ func NewDevLocalSigner(keyID string) (*DevLocalSigner, error) {
 }
 
 func (s *DevLocalSigner) Sign(_ context.Context, payload []byte, meta Metadata) (SignedEnvelope, error) {
+	if len(s.PrivateKey) != ed25519.PrivateKeySize {
+		return SignedEnvelope{}, fmt.Errorf("dev-local signer requires an Ed25519 private key")
+	}
 	keyID := meta.KeyID
 	if keyID == "" {
 		keyID = s.KeyID
@@ -101,9 +105,34 @@ func (s *DevLocalSigner) Verify(_ context.Context, envelope SignedEnvelope) (Ver
 		PayloadSHA256: "sha256:" + hex.EncodeToString(payloadHash[:]),
 		VerifiedAt:    now().UTC(),
 	}
-	result.Valid = envelope.PayloadSHA256 == result.PayloadSHA256 && ed25519.Verify(s.PublicKey, envelope.Payload, envelope.Signature)
-	if !result.Valid {
-		result.Error = "signature verification failed"
+	if envelope.Kind != "SignedEnvelope" {
+		result.Error = "payload is not a signed envelope"
+		return result, nil
 	}
+	if envelope.Algorithm != "Ed25519" {
+		result.Error = fmt.Sprintf("unsupported signing algorithm %q", envelope.Algorithm)
+		return result, nil
+	}
+	if envelope.KeyID == "" {
+		result.Error = "signed envelope is missing key_id"
+		return result, nil
+	}
+	if len(s.PublicKey) != ed25519.PublicKeySize {
+		result.Error = "verifier requires an Ed25519 public key"
+		return result, nil
+	}
+	if envelope.ExpiresAt != nil && !now().UTC().Before(envelope.ExpiresAt.UTC()) {
+		result.Error = "signed envelope expired"
+		return result, nil
+	}
+	if envelope.PayloadSHA256 != result.PayloadSHA256 {
+		result.Error = "payload hash mismatch"
+		return result, nil
+	}
+	if !ed25519.Verify(s.PublicKey, envelope.Payload, envelope.Signature) {
+		result.Error = "signature verification failed"
+		return result, nil
+	}
+	result.Valid = true
 	return result, nil
 }

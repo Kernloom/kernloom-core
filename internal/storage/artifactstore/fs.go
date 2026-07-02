@@ -5,6 +5,7 @@ package artifactstore
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -28,6 +29,11 @@ func (s *FSStore) Put(_ context.Context, art artifact.Artifact) (artifact.Ref, e
 	if root == "" {
 		root = "/var/lib/kernloom/artifacts"
 	}
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return artifact.Ref{}, err
+	}
+	root = absRoot
 	org := valueOrDefault(s.Org, "default-org")
 	environment := valueOrDefault(s.Environment, "dev")
 	sourceCommit := valueOrDefault(art.Metadata.SourceCommit, "uncommitted")
@@ -40,6 +46,16 @@ func (s *FSStore) Put(_ context.Context, art artifact.Artifact) (artifact.Ref, e
 	}
 	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 	if err != nil {
+		if errors.Is(err, os.ErrExist) {
+			existing, readErr := os.ReadFile(path)
+			if readErr != nil {
+				return artifact.Ref{}, readErr
+			}
+			if sha256Bytes(existing) != hash {
+				return artifact.Ref{}, fmt.Errorf("artifact path exists with different content: %s", path)
+			}
+			return artifact.Ref{URI: "fs://" + path, SHA256: hash}, nil
+		}
 		return artifact.Ref{}, err
 	}
 	defer file.Close()
@@ -62,6 +78,11 @@ func (s *FSStore) Get(_ context.Context, ref artifact.Ref) ([]byte, error) {
 		return nil, fmt.Errorf("artifact hash mismatch for %s", ref.URI)
 	}
 	return data, nil
+}
+
+func (s *FSStore) Verify(ctx context.Context, ref artifact.Ref) error {
+	_, err := s.Get(ctx, ref)
+	return err
 }
 
 func valueOrDefault(value, fallback string) string {
