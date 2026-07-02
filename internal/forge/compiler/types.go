@@ -143,6 +143,7 @@ type SimulationReport struct {
 	Kind        string             `json:"kind"`
 	PolicyID    string             `json:"policy_id"`
 	Simulations []SimulationStatus `json:"simulations"`
+	Findings    []string           `json:"findings"`
 }
 
 type SimulationStatus struct {

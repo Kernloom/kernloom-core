@@ -152,9 +152,17 @@ func compileOne(card *intent.Card, catalog *registry.Catalog, celValidator *expr
 	if err != nil {
 		return Result{}, err
 	}
-	simulationReport := SimulationReport{Kind: "SimulationReport", PolicyID: card.ID}
+	simulationReport := SimulationReport{
+		Kind:        "SimulationReport",
+		PolicyID:    card.ID,
+		Simulations: []SimulationStatus{},
+		Findings:    []string{},
+	}
 	for _, simulation := range resolved.Spec.Simulations {
 		simulationReport.Simulations = append(simulationReport.Simulations, SimulationStatus{Name: simulation.Name, Status: "resolved_only"})
+	}
+	if len(simulationReport.Simulations) == 0 {
+		simulationReport.Findings = append(simulationReport.Findings, "No simulation examples defined.")
 	}
 	simulationPath, simulationHash, err := writeJSON(filepath.Join(opts.OutputDir, "reports", card.ID+".simulation.json"), simulationReport)
 	if err != nil {
@@ -459,6 +467,9 @@ func writeReview(path string, card *intent.Card, resolved ResolvedPolicy) (strin
 			fmt.Fprintf(&b, "- `%s`: resolved only, expected `%s`\n", simulation.Name, simulation.ExpectEffect.Label)
 		}
 		fmt.Fprintf(&b, "\n")
+	} else {
+		fmt.Fprintf(&b, "## Simulation Examples\n\n")
+		fmt.Fprintf(&b, "- No simulation examples defined.\n\n")
 	}
 	fmt.Fprintf(&b, "## Reports\n\n")
 	fmt.Fprintf(&b, "- Meaning coverage: `resolved_only`\n")

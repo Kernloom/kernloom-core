@@ -4,6 +4,7 @@
 package compiler
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -32,5 +33,72 @@ func TestCompileAccessIntent(t *testing.T) {
 		if _, err := os.Stat(path); err != nil {
 			t.Fatalf("expected generated artifact %s: %v", path, err)
 		}
+	}
+}
+
+func TestCompileSimulationReportUsesEmptyArrayAndFinding(t *testing.T) {
+	policyRepo := t.TempDir()
+	policyDir := filepath.Join(policyRepo, "policies", "access")
+	if err := os.MkdirAll(policyDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	policyPath := filepath.Join(policyDir, "minimal.intent.kni")
+	if err := os.WriteFile(policyPath, []byte(`intent "access.minimal" {
+  version = "kni/v0.5"
+  owner   = "security-platform"
+  type    = "access"
+  target  = "ziti"
+  stage   = "prod"
+
+  profile     = "production.high_assurance_access"
+  risk_recipe = "access_risk.standard"
+
+  rule "minimal access" {
+    effect   = "allow"
+    subject  = "network source"
+    action   = "connect"
+    resource = "production application"
+
+    only_when = [
+      "device is healthy"
+    ]
+  }
+
+  runtime {
+    allowed   = false
+    max_ttl   = "15m"
+    max_scope = "application"
+  }
+}
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out := t.TempDir()
+	if _, err := Compile(Options{
+		PolicyRepo:         policyRepo,
+		CoreRegistry:       "../../../../kernloom-core-registry",
+		EnterpriseRegistry: "../../../../enterprise-kernloom-registry",
+		OutputDir:          out,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(out, "reports", "access.minimal.simulation.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var report SimulationReport
+	if err := json.Unmarshal(data, &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.Simulations == nil {
+		t.Fatal("expected simulations to be an empty array, got nil")
+	}
+	if len(report.Simulations) != 0 {
+		t.Fatalf("expected no simulations, got %d", len(report.Simulations))
+	}
+	if len(report.Findings) != 1 || report.Findings[0] != "No simulation examples defined." {
+		t.Fatalf("expected missing simulation finding, got %#v", report.Findings)
 	}
 }
