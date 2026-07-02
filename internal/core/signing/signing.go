@@ -9,6 +9,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"time"
 )
@@ -42,6 +43,18 @@ type SignedEnvelope struct {
 	PolicyID      string     `json:"policy_id,omitempty"`
 }
 
+type ProtectedHeader struct {
+	Kind          string     `json:"kind"`
+	KeyID         string     `json:"key_id"`
+	Algorithm     string     `json:"algorithm"`
+	PayloadType   string     `json:"payload_type"`
+	PayloadSHA256 string     `json:"payload_sha256"`
+	SignedAt      time.Time  `json:"signed_at"`
+	ExpiresAt     *time.Time `json:"expires_at"`
+	SourceCommit  string     `json:"source_commit"`
+	PolicyID      string     `json:"policy_id"`
+}
+
 type VerificationResult struct {
 	Valid         bool      `json:"valid"`
 	KeyID         string    `json:"key_id"`
@@ -58,6 +71,9 @@ type DevLocalSigner struct {
 }
 
 func NewDevLocalSigner(keyID string) (*DevLocalSigner, error) {
+	if keyID == "" {
+		return nil, fmt.Errorf("dev-local signer requires key id")
+	}
 	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		return nil, err
@@ -69,29 +85,39 @@ func (s *DevLocalSigner) Sign(_ context.Context, payload []byte, meta Metadata) 
 	if len(s.PrivateKey) != ed25519.PrivateKeySize {
 		return SignedEnvelope{}, fmt.Errorf("dev-local signer requires an Ed25519 private key")
 	}
+	if s.KeyID == "" {
+		return SignedEnvelope{}, fmt.Errorf("dev-local signer requires key id")
+	}
 	keyID := meta.KeyID
 	if keyID == "" {
 		keyID = s.KeyID
+	}
+	if keyID != s.KeyID {
+		return SignedEnvelope{}, fmt.Errorf("metadata key_id %q does not match signer key_id %q", keyID, s.KeyID)
 	}
 	now := time.Now
 	if s.Now != nil {
 		now = s.Now
 	}
 	payloadHash := sha256.Sum256(payload)
-	signature := ed25519.Sign(s.PrivateKey, payload)
-	return SignedEnvelope{
+	envelope := SignedEnvelope{
 		Kind:          "SignedEnvelope",
 		KeyID:         keyID,
 		Algorithm:     "Ed25519",
 		PayloadType:   "application/vnd.kernloom.artifact+json",
 		Payload:       payload,
 		PayloadSHA256: "sha256:" + hex.EncodeToString(payloadHash[:]),
-		Signature:     signature,
 		SignedAt:      now().UTC(),
 		ExpiresAt:     meta.ExpiresAt,
 		SourceCommit:  meta.SourceCommit,
 		PolicyID:      meta.PolicyID,
-	}, nil
+	}
+	input, err := signingInput(envelope)
+	if err != nil {
+		return SignedEnvelope{}, err
+	}
+	envelope.Signature = ed25519.Sign(s.PrivateKey, input)
+	return envelope, nil
 }
 
 func (s *DevLocalSigner) Verify(_ context.Context, envelope SignedEnvelope) (VerificationResult, error) {
@@ -117,6 +143,14 @@ func (s *DevLocalSigner) Verify(_ context.Context, envelope SignedEnvelope) (Ver
 		result.Error = "signed envelope is missing key_id"
 		return result, nil
 	}
+	if s.KeyID == "" {
+		result.Error = "verifier requires key id"
+		return result, nil
+	}
+	if envelope.KeyID != s.KeyID {
+		result.Error = fmt.Sprintf("signed envelope key_id %q does not match verifier key_id %q", envelope.KeyID, s.KeyID)
+		return result, nil
+	}
 	if len(s.PublicKey) != ed25519.PublicKeySize {
 		result.Error = "verifier requires an Ed25519 public key"
 		return result, nil
@@ -129,10 +163,29 @@ func (s *DevLocalSigner) Verify(_ context.Context, envelope SignedEnvelope) (Ver
 		result.Error = "payload hash mismatch"
 		return result, nil
 	}
-	if !ed25519.Verify(s.PublicKey, envelope.Payload, envelope.Signature) {
+	input, err := signingInput(envelope)
+	if err != nil {
+		result.Error = err.Error()
+		return result, nil
+	}
+	if !ed25519.Verify(s.PublicKey, input, envelope.Signature) {
 		result.Error = "signature verification failed"
 		return result, nil
 	}
 	result.Valid = true
 	return result, nil
+}
+
+func signingInput(envelope SignedEnvelope) ([]byte, error) {
+	return json.Marshal(ProtectedHeader{
+		Kind:          envelope.Kind,
+		KeyID:         envelope.KeyID,
+		Algorithm:     envelope.Algorithm,
+		PayloadType:   envelope.PayloadType,
+		PayloadSHA256: envelope.PayloadSHA256,
+		SignedAt:      envelope.SignedAt,
+		ExpiresAt:     envelope.ExpiresAt,
+		SourceCommit:  envelope.SourceCommit,
+		PolicyID:      envelope.PolicyID,
+	})
 }

@@ -45,6 +45,9 @@ func VerifySignedRuntimeBundle(ctx context.Context, data []byte, verifier signin
 	if !result.Valid {
 		return RuntimeBundleVerification{}, fmt.Errorf("runtime bundle signature invalid: %s", result.Error)
 	}
+	if envelope.ExpiresAt == nil {
+		return RuntimeBundleVerification{}, fmt.Errorf("runtime bundle signed envelope requires expires_at")
+	}
 	var runtimeBundle corebundle.RuntimeBundle
 	if err := json.Unmarshal(envelope.Payload, &runtimeBundle); err != nil {
 		return RuntimeBundleVerification{}, err

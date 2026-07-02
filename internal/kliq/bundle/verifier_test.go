@@ -56,6 +56,73 @@ func TestVerifySignedRuntimeBundleRejectsExpiredEnvelope(t *testing.T) {
 	}
 }
 
+func TestVerifySignedRuntimeBundleRejectsMissingExpiresAt(t *testing.T) {
+	now := time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC)
+	signer := testSigner(t, now)
+	payload, err := json.Marshal(runtimeBundle())
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope, err := signer.Sign(context.Background(), payload, signing.Metadata{
+		PolicyID:     "policy.test",
+		SourceCommit: "abc123",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = VerifySignedRuntimeBundle(context.Background(), data, signer)
+	if err == nil {
+		t.Fatal("expected runtime bundle without expires_at to be rejected")
+	}
+}
+
+func TestVerifySignedRuntimeBundleRejectsProtectedMetadataTampering(t *testing.T) {
+	now := time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC)
+	signer := testSigner(t, now)
+	envelope := signedRuntimeBundle(t, signer, now.Add(time.Hour))
+
+	tests := map[string]func(signing.SignedEnvelope) signing.SignedEnvelope{
+		"expires_at extended": func(envelope signing.SignedEnvelope) signing.SignedEnvelope {
+			extended := now.Add(365 * 24 * time.Hour)
+			envelope.ExpiresAt = &extended
+			return envelope
+		},
+		"key_id changed": func(envelope signing.SignedEnvelope) signing.SignedEnvelope {
+			envelope.KeyID = "prod-key"
+			return envelope
+		},
+		"policy_id changed": func(envelope signing.SignedEnvelope) signing.SignedEnvelope {
+			envelope.PolicyID = "policy.other"
+			return envelope
+		},
+		"source_commit changed": func(envelope signing.SignedEnvelope) signing.SignedEnvelope {
+			envelope.SourceCommit = "def456"
+			return envelope
+		},
+		"payload_type changed": func(envelope signing.SignedEnvelope) signing.SignedEnvelope {
+			envelope.PayloadType = "application/json"
+			return envelope
+		},
+	}
+
+	for name, tamper := range tests {
+		t.Run(name, func(t *testing.T) {
+			data, err := json.Marshal(tamper(envelope))
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = VerifySignedRuntimeBundle(context.Background(), data, signer)
+			if err == nil {
+				t.Fatal("expected protected metadata tampering to be rejected")
+			}
+		})
+	}
+}
+
 func TestVerifySignedRuntimeBundleRejectsInvalidSignature(t *testing.T) {
 	now := time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC)
 	signer := testSigner(t, now)

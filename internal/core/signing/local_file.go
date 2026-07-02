@@ -53,6 +53,9 @@ func loadDevLocalSigner(path string, requirePrivate bool) (*DevLocalSigner, erro
 	if key.Algorithm != "Ed25519" {
 		return nil, fmt.Errorf("%s: unsupported key algorithm %q", path, key.Algorithm)
 	}
+	if key.KeyID == "" {
+		return nil, fmt.Errorf("%s: missing key_id", path)
+	}
 	if len(key.PublicKey) != ed25519.PublicKeySize {
 		return nil, fmt.Errorf("%s: invalid Ed25519 public key", path)
 	}
