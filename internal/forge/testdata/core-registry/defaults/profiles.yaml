@@ -1,0 +1,10 @@
+kind: ProfileSet
+spec:
+  profiles:
+    - id: production.high_assurance_access
+      stage: prod
+      guardrails:
+        - guardrail.unknown_is_not_success
+      runtime_defaults:
+        max_ttl: 15m
+        max_scope: user

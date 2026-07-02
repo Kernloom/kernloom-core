@@ -16,11 +16,12 @@ import (
 
 func TestCompileAccessIntent(t *testing.T) {
 	out := t.TempDir()
+	policyRepo := testdataPath("policy-repo")
 	results, err := Compile(Options{
-		PolicyRepo:         "../../../../enterprise-kernloom-policies",
-		PolicyFile:         "../../../../enterprise-kernloom-policies/policies/access/protect-production-admin-access.intent.kni",
-		CoreRegistry:       "../../../../kernloom-core-registry",
-		EnterpriseRegistry: "../../../../enterprise-kernloom-registry",
+		PolicyRepo:         policyRepo,
+		PolicyFile:         filepath.Join(policyRepo, "policies", "access", "protect-production-admin-access.intent.kni"),
+		CoreRegistry:       testdataPath("core-registry"),
+		EnterpriseRegistry: testdataPath("enterprise-registry"),
 		OutputDir:          out,
 	})
 	if err != nil {
@@ -119,8 +120,8 @@ func TestCompileSimulationReportUsesEmptyArrayAndFinding(t *testing.T) {
 	out := t.TempDir()
 	if _, err := Compile(Options{
 		PolicyRepo:         policyRepo,
-		CoreRegistry:       "../../../../kernloom-core-registry",
-		EnterpriseRegistry: "../../../../enterprise-kernloom-registry",
+		CoreRegistry:       testdataPath("core-registry"),
+		EnterpriseRegistry: testdataPath("enterprise-registry"),
 		OutputDir:          out,
 	}); err != nil {
 		t.Fatal(err)
@@ -143,4 +144,8 @@ func TestCompileSimulationReportUsesEmptyArrayAndFinding(t *testing.T) {
 	if len(report.Findings) != 1 || report.Findings[0] != "No simulation examples defined." {
 		t.Fatalf("expected missing simulation finding, got %#v", report.Findings)
 	}
+}
+
+func testdataPath(name string) string {
+	return filepath.Join("..", "testdata", name)
 }

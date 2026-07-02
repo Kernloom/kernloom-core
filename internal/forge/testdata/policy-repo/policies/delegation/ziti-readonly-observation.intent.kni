@@ -1,0 +1,25 @@
+intent "delegation.ziti-readonly-observation" {
+  version = "kni/v0.5"
+  owner   = "security-platform"
+  type    = "delegation"
+  target  = "ziti"
+  stage   = "prod"
+
+  profile     = "production.high_assurance_access"
+  risk_recipe = "access_risk.standard"
+
+  rule "readonly observation" {
+    effect   = "allow"
+    subject  = "security operator"
+    action   = "read"
+    resource = "ziti controller"
+
+    only_when = [
+      "readonly role assigned"
+    ]
+  }
+
+  runtime {
+    allowed = false
+  }
+}

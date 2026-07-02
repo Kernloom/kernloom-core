@@ -6,6 +6,7 @@ package jobs
 import (
 	"context"
 	"encoding/json"
+	"path/filepath"
 	"testing"
 
 	"github.com/kernloom/kernloom-core/internal/forge/compiler"
@@ -14,11 +15,12 @@ import (
 func TestRunnerRunsSimulationJob(t *testing.T) {
 	ctx := context.Background()
 	store := NewMemoryStore()
+	policyRepo := testdataPath("policy-repo")
 	job, err := NewJob(TypeSimulation, "alice", SimulationPayload{
-		PolicyRepo:         "../../../../enterprise-kernloom-policies",
-		PolicyFile:         "../../../../enterprise-kernloom-policies/policies/delegation/ziti-readonly-observation.intent.kni",
-		CoreRegistry:       "../../../../kernloom-core-registry",
-		EnterpriseRegistry: "../../../../enterprise-kernloom-registry",
+		PolicyRepo:         policyRepo,
+		PolicyFile:         filepath.Join(policyRepo, "policies", "delegation", "ziti-readonly-observation.intent.kni"),
+		CoreRegistry:       testdataPath("core-registry"),
+		EnterpriseRegistry: testdataPath("enterprise-registry"),
 		OutputDir:          t.TempDir(),
 	})
 	if err != nil {
@@ -44,4 +46,8 @@ func TestRunnerRunsSimulationJob(t *testing.T) {
 	if result.Status != "resolved_only" || len(result.Policies) != 1 {
 		t.Fatalf("unexpected simulation result %#v", result)
 	}
+}
+
+func testdataPath(name string) string {
+	return filepath.Join("..", "testdata", name)
 }

@@ -1,0 +1,52 @@
+kind: AuthoringCatalog
+metadata:
+  version: vtest
+spec:
+  values:
+    - label: access
+      canonical_id: policy_type.access
+      kind: policy_type
+    - label: delegation
+      canonical_id: policy_type.delegation
+      kind: policy_type
+    - label: ziti
+      canonical_id: target_system.ziti
+      kind: target_system
+    - label: prod
+      canonical_id: stage.prod
+      kind: stage
+    - label: allow
+      canonical_id: effect.allow
+      kind: effect
+    - label: network source
+      canonical_id: subject.network_source
+      kind: subject
+    - label: security operator
+      canonical_id: subject.security_operator
+      kind: subject
+    - label: connect
+      canonical_id: action.connect
+      kind: action
+    - label: read
+      canonical_id: action.read
+      kind: action
+    - label: production application
+      canonical_id: resource.production_application
+      kind: resource
+    - label: ziti controller
+      canonical_id: resource.ziti_controller
+      kind: resource
+    - label: device is healthy
+      canonical_id: fact.device_is_healthy
+      kind: fact
+      cel: device.healthy == true
+    - label: readonly role assigned
+      canonical_id: fact.readonly_role_assigned
+      kind: fact
+      cel: identity.role == "readonly"
+    - label: user
+      canonical_id: scope.user
+      kind: scope
+    - label: application
+      canonical_id: scope.application
+      kind: scope

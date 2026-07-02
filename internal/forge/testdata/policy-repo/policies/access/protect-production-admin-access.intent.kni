@@ -1,0 +1,34 @@
+intent "access.protect-production-admin-access" {
+  version = "kni/v0.5"
+  owner   = "security-platform"
+  type    = "access"
+  target  = "ziti"
+  stage   = "prod"
+
+  profile     = "production.high_assurance_access"
+  risk_recipe = "access_risk.standard"
+
+  rule "healthy source may connect" {
+    effect   = "allow"
+    subject  = "network source"
+    action   = "connect"
+    resource = "production application"
+
+    only_when = [
+      "device is healthy"
+    ]
+  }
+
+  simulation "healthy source" {
+    given = [
+      "device is healthy"
+    ]
+    expect { effect = "allow" }
+  }
+
+  runtime {
+    allowed   = false
+    max_ttl   = "15m"
+    max_scope = "application"
+  }
+}

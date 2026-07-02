@@ -1,0 +1,6 @@
+kind: GuardrailPack
+spec:
+  guardrails:
+    - id: guardrail.unknown_is_not_success
+      mode: block
+      description: Unknown evaluation state is not considered success.

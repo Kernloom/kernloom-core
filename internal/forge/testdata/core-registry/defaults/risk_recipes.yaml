@@ -1,0 +1,8 @@
+kind: RiskRecipeSet
+spec:
+  recipes:
+    - id: access_risk.standard
+      output: {}
+      scoring: {}
+      thresholds:
+        low: score < 40
