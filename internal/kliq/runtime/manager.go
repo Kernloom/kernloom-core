@@ -460,6 +460,52 @@ func (m Manager) Reconcile(ctx context.Context) (ReconcileResult, error) {
 	return result, nil
 }
 
+func (m Manager) ReconcileDryRun(ctx context.Context) (ReconcileResult, error) {
+	if m.Store == nil {
+		return ReconcileResult{}, fmt.Errorf("kliq runtime manager requires state store")
+	}
+	result := ReconcileResult{AdapterResults: map[string]AdapterReconcileResult{}}
+	if _, err := m.Store.LastBundle(ctx); err != nil {
+		result.Findings = append(result.Findings, "cached runtime bundle unavailable: "+err.Error())
+	}
+	now := m.now()
+	leases, err := m.Store.ActiveLeases(ctx)
+	if err != nil {
+		return ReconcileResult{}, err
+	}
+	grouped := groupLeasesByAdapter(leases)
+	adapterIDs := make([]string, 0, len(grouped))
+	for adapterID := range grouped {
+		adapterIDs = append(adapterIDs, adapterID)
+	}
+	sort.Strings(adapterIDs)
+	for _, adapterID := range adapterIDs {
+		adapterResult := AdapterReconcileResult{AdapterID: adapterID}
+		for _, lease := range grouped[adapterID] {
+			if !lease.Selector().Valid() {
+				message := "runtime action lease " + lease.RuntimeActionID + " has incomplete selector"
+				adapterResult.Unknown++
+				adapterResult.Findings = append(adapterResult.Findings, message)
+				result.Unknown++
+				result.Findings = append(result.Findings, message)
+				continue
+			}
+			if now.Before(lease.ExpiresAt) {
+				adapterResult.Active++
+				result.Active++
+				continue
+			}
+			adapterResult.Expired++
+			result.Expired++
+		}
+		result.AdapterResults[adapterID] = adapterResult
+	}
+	if result.Expired > 0 {
+		result.Findings = append(result.Findings, "expired runtime action leases would be cleaned up")
+	}
+	return result, nil
+}
+
 func (m Manager) reconcileActiveLease(ctx context.Context, executor RuntimeExecutor, lease actionstate.RuntimeActionLease, now time.Time, result *ReconcileResult, adapterResult *AdapterReconcileResult) {
 	stateReader, ok := executor.(RuntimeStateReader)
 	if !ok {

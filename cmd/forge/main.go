@@ -9,6 +9,7 @@ import (
 	"encoding/pem"
 	"flag"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"time"
@@ -19,6 +20,8 @@ import (
 	"github.com/kernloom/kernloom-core/internal/forge/compiler"
 	"github.com/kernloom/kernloom-core/internal/forge/jobs"
 )
+
+var logger = slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{}))
 
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "compile" {
@@ -56,9 +59,11 @@ func compile(args []string) {
 	}
 	results, err := compiler.Compile(opts)
 	if err != nil {
+		logger.Error("forge_compile_failed", "error", err.Error(), "correlation_id", opts.CorrelationID)
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+	logger.Info("forge_compile_complete", "policies", len(results), "correlation_id", opts.CorrelationID)
 	for _, result := range results {
 		fmt.Printf("%s\n", result.PolicyID)
 		fmt.Printf("  review: %s\n", result.ReviewPath)
@@ -87,11 +92,13 @@ func api(args []string) {
 	}
 	store, err := jobStore(*queueKind, *redisAddr)
 	if err != nil {
+		logger.Error("forge_job_store_failed", "queue", *queueKind, "error", err.Error())
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
 	authenticator, err := authenticator(*enableDevTokens, *oidcIssuer, *oidcAudience, *oidcHMACSecret, *oidcRSAPublicKey)
 	if err != nil {
+		logger.Error("forge_authenticator_failed", "error", err.Error())
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
@@ -103,8 +110,9 @@ func api(args []string) {
 		Authenticator: authenticator,
 		Store:         store,
 	}
-	fmt.Printf("forge api listening on %s with %s queue\n", *addr, *queueKind)
+	logger.Info("forge_api_starting", "addr", *addr, "queue", *queueKind)
 	if err := http.ListenAndServe(*addr, server.Handler()); err != nil {
+		logger.Error("forge_api_failed", "addr", *addr, "error", err.Error())
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}

@@ -117,6 +117,33 @@ cd ../kernloom-core
   --adapter-addr 127.0.0.1:18082
 ```
 
+Inspect local KLIQ runtime state without exposing raw targets, audit payloads or
+signed bundle payloads:
+
+```sh
+./bin/kliq status --state /tmp/kernloom-kliq-runtime/state.db
+./bin/kliq bundle status --state /tmp/kernloom-kliq-runtime/state.db
+./bin/kliq adapters status --state /tmp/kernloom-kliq-runtime/state.db
+./bin/kliq runtime actions --state /tmp/kernloom-kliq-runtime/state.db
+./bin/kliq runtime journal \
+  --state /tmp/kernloom-kliq-runtime/state.db \
+  --action-id runtime_action.example
+./bin/kliq audit pending --state /tmp/kernloom-kliq-runtime/state.db
+./bin/kliq reconcile --state /tmp/kernloom-kliq-runtime/state.db --dry-run
+```
+
+The local read-only status API is loopback-only by default:
+
+```sh
+./bin/kliq status-api \
+  --state /tmp/kernloom-kliq-runtime/state.db \
+  --listen 127.0.0.1:18090
+
+curl -sS http://127.0.0.1:18090/status
+curl -sS http://127.0.0.1:18090/runtime/actions
+curl -sS http://127.0.0.1:18090/audit/pending
+```
+
 ## Dev Services
 
 ```sh

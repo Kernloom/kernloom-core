@@ -7,7 +7,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -45,12 +44,42 @@ func main() {
 		status(os.Args[2:])
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "status-api" {
+		serveStatusAPI(os.Args[2:])
+		return
+	}
+	if len(os.Args) > 2 && os.Args[1] == "bundle" && os.Args[2] == "status" {
+		bundleStatusCmd(os.Args[3:])
+		return
+	}
+	if len(os.Args) > 2 && os.Args[1] == "adapters" && os.Args[2] == "status" {
+		adaptersStatusCmd(os.Args[3:])
+		return
+	}
+	if len(os.Args) > 2 && os.Args[1] == "runtime" && os.Args[2] == "actions" {
+		runtimeActionsCmd(os.Args[3:])
+		return
+	}
+	if len(os.Args) > 2 && os.Args[1] == "runtime" && os.Args[2] == "journal" {
+		runtimeJournalCmd(os.Args[3:])
+		return
+	}
+	if len(os.Args) > 2 && os.Args[1] == "audit" && os.Args[2] == "pending" {
+		auditPendingCmd(os.Args[3:])
+		return
+	}
 	fmt.Println(version.Binary("kliq"))
 	fmt.Println("usage: kliq verify-bundle --bundle path --key path")
 	fmt.Println("usage: kliq load-bundle --bundle path --key path [--state ./var/kernloom/kliq/state.db]")
 	fmt.Println("usage: kliq execute-action --key path --adapter-id id --adapter-addr host:port --capability-id id --capability-grant-id id --decision-id id --action-type id --target-key value --reason text [--audit-id id|--derive-audit-id] [--state path] [--target-scope scope] [--ttl 1m] [--mode required] [--correlation-id id]")
-	fmt.Println("usage: kliq reconcile --key path --adapter-id id --adapter-addr host:port [--state ./var/kernloom/kliq/state.db]")
+	fmt.Println("usage: kliq reconcile --key path --adapter-id id --adapter-addr host:port [--state ./var/kernloom/kliq/state.db] [--dry-run]")
 	fmt.Println("usage: kliq status [--state ./var/kernloom/kliq/state.db]")
+	fmt.Println("usage: kliq bundle status [--state ./var/kernloom/kliq/state.db]")
+	fmt.Println("usage: kliq adapters status [--state ./var/kernloom/kliq/state.db]")
+	fmt.Println("usage: kliq runtime actions [--state ./var/kernloom/kliq/state.db]")
+	fmt.Println("usage: kliq runtime journal --action-id id [--state ./var/kernloom/kliq/state.db]")
+	fmt.Println("usage: kliq audit pending [--state ./var/kernloom/kliq/state.db]")
+	fmt.Println("usage: kliq status-api [--state ./var/kernloom/kliq/state.db] [--listen 127.0.0.1:18090]")
 }
 
 func verifyBundle(args []string) {
@@ -72,9 +101,11 @@ func verifyBundle(args []string) {
 	}
 	result, err := kliqbundle.LoadSignedRuntimeBundle(context.Background(), *bundlePath, verifier)
 	if err != nil {
+		logError("kliq_verify_bundle_failed", "error", err.Error())
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+	logInfo("kliq_runtime_bundle_verified", "policy_id", result.Bundle.Metadata.PolicyID, "key_id", redactID(result.Envelope.KeyID), "payload_sha256", result.Result.PayloadSHA256)
 	fmt.Println("runtime bundle verified")
 	fmt.Printf("  policy_id: %s\n", result.Bundle.Metadata.PolicyID)
 	fmt.Printf("  key_id: %s\n", result.Envelope.KeyID)
@@ -101,9 +132,11 @@ func loadBundle(args []string) {
 	defer closeStore()
 	record, err := manager.LoadBundle(context.Background(), kliqbundle.LocalFileSource{Path: *bundlePath})
 	if err != nil {
+		logError("kliq_load_bundle_failed", "error", err.Error())
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+	logInfo("kliq_runtime_bundle_loaded", "bundle_id", record.BundleID, "policy_id", record.PolicyID, "correlation_id", redactID(record.CorrelationID))
 	fmt.Println("runtime bundle loaded")
 	fmt.Printf("  state: %s\n", *statePath)
 	fmt.Printf("  bundle_id: %s\n", record.BundleID)
@@ -161,6 +194,7 @@ func executeAction(args []string) {
 		DeriveAuditIDFromDecisionID: *deriveAuditID,
 	})
 	if err != nil {
+		logError("kliq_execute_action_failed", "decision_id", redactID(*decisionID), "adapter_id", *adapterID, "correlation_id", redactID(*correlationID), "error", err.Error())
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
@@ -169,6 +203,7 @@ func executeAction(args []string) {
 		os.Exit(1)
 	}
 	action := result.Results[0]
+	logInfo("kliq_runtime_action_processed", "plan_id", result.Plan.PlanID, "runtime_action_id", action.Lease.RuntimeActionID, "adapter_id", action.Lease.AdapterID, "capability_id", action.Lease.CapabilityID, "correlation_id", redactID(action.Lease.CorrelationID), "status", string(action.Lease.Status), "applied", action.Applied)
 	fmt.Println("runtime action plan processed")
 	fmt.Printf("  plan_id: %s\n", result.Plan.PlanID)
 	fmt.Printf("  applied: %t\n", action.Applied)
@@ -186,9 +221,24 @@ func reconcile(args []string) {
 	statePath := fs.String("state", defaultStatePath, "path to KLIQ local SQLite state")
 	adapterID := fs.String("adapter-id", "", "runtime adapter id")
 	adapterAddr := fs.String("adapter-addr", "", "runtime adapter gRPC address")
+	dryRun := fs.Bool("dry-run", false, "inspect reconciliation work without adapter calls or state mutations")
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
+	}
+	if *dryRun {
+		store, closeStore := stateStoreOrExit(*statePath)
+		defer closeStore()
+		result, err := (kliqruntime.Manager{Store: store}).ReconcileDryRun(context.Background())
+		if err != nil {
+			logError("kliq_reconcile_dry_run_failed", "error", err.Error())
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		logInfo("kliq_reconcile_dry_run_complete", "active", result.Active, "expired", result.Expired, "unknown", result.Unknown)
+		fmt.Println("kliq reconciliation dry run complete")
+		printReconcileResult(result)
+		return
 	}
 	if *keyPath == "" || *adapterID == "" || *adapterAddr == "" {
 		fmt.Fprintln(os.Stderr, "kliq reconcile requires --key, --adapter-id and --adapter-addr")
@@ -200,16 +250,13 @@ func reconcile(args []string) {
 	defer closeStore()
 	result, err := manager.Reconcile(context.Background())
 	if err != nil {
+		logError("kliq_reconcile_failed", "adapter_id", *adapterID, "error", err.Error())
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+	logInfo("kliq_reconcile_complete", "active", result.Active, "expired", result.Expired, "unknown", result.Unknown)
 	fmt.Println("kliq reconciliation complete")
-	fmt.Printf("  active: %d\n", result.Active)
-	fmt.Printf("  expired: %d\n", result.Expired)
-	fmt.Printf("  unknown: %d\n", result.Unknown)
-	for _, finding := range result.Findings {
-		fmt.Printf("  finding: %s\n", finding)
-	}
+	printReconcileResult(result)
 }
 
 func status(args []string) {
@@ -219,56 +266,105 @@ func status(args []string) {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
-	store, err := actionstate.OpenSQLite(*statePath)
+	store, closeStore := stateStoreOrExit(*statePath)
+	defer closeStore()
+	snapshot, err := buildStatusSnapshot(context.Background(), store, *statePath, nil)
 	if err != nil {
+		logError("kliq_status_failed", "error", err.Error())
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	defer store.Close()
+	printStatusSnapshot(snapshot)
+}
 
-	ctx := context.Background()
-	bundle, bundleErr := store.LastBundle(ctx)
-	if bundleErr != nil && !errors.Is(bundleErr, actionstate.ErrNotFound) {
-		fmt.Fprintln(os.Stderr, bundleErr)
-		os.Exit(1)
+func bundleStatusCmd(args []string) {
+	fs := flag.NewFlagSet("kliq bundle status", flag.ExitOnError)
+	statePath := fs.String("state", defaultStatePath, "path to KLIQ local SQLite state")
+	if err := fs.Parse(args); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
 	}
-	leases, err := store.AllLeases(ctx)
+	store, closeStore := stateStoreOrExit(*statePath)
+	defer closeStore()
+	bundle, err := store.LastBundle(context.Background())
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	audits, err := store.PendingAudits(ctx)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
+	printBundleStatus(bundleStatus(bundle))
+}
 
-	fmt.Println("kliq status")
-	fmt.Printf("  state: %s\n", *statePath)
-	if bundleErr == nil {
-		fmt.Printf("  bundle_id: %s\n", bundle.BundleID)
-		fmt.Printf("  policy_id: %s\n", bundle.PolicyID)
-		fmt.Printf("  source_commit: %s\n", redactID(bundle.SourceCommit))
-		fmt.Printf("  correlation_id: %s\n", redactID(bundle.CorrelationID))
-		fmt.Printf("  expires_at: %s\n", bundle.ExpiresAt.Format("2006-01-02T15:04:05Z07:00"))
-	} else {
-		fmt.Println("  bundle: unavailable")
+func adaptersStatusCmd(args []string) {
+	fs := flag.NewFlagSet("kliq adapters status", flag.ExitOnError)
+	statePath := fs.String("state", defaultStatePath, "path to KLIQ local SQLite state")
+	if err := fs.Parse(args); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
 	}
-	fmt.Printf("  runtime_actions: %d\n", len(leases))
-	fmt.Printf("  pending_audit_records: %d\n", len(audits))
-	for _, lease := range leases {
-		fmt.Printf("  action: %s\n", lease.RuntimeActionID)
-		fmt.Printf("    plan_id: %s\n", lease.PlanID)
-		fmt.Printf("    adapter_id: %s\n", lease.AdapterID)
-		fmt.Printf("    capability_id: %s\n", lease.CapabilityID)
-		fmt.Printf("    correlation_id: %s\n", redactID(lease.CorrelationID))
-		fmt.Printf("    action_type: %s\n", lease.ActionType)
-		fmt.Printf("    target_scope: %s\n", lease.TargetScope)
-		fmt.Printf("    target_key_sha256: %s\n", redactedHash(lease.TargetKey))
-		fmt.Printf("    idempotency_key_sha256: %s\n", redactedHash(lease.IdempotencyKey))
-		fmt.Printf("    status: %s\n", lease.Status)
-		fmt.Printf("    expires_at: %s\n", lease.ExpiresAt.Format("2006-01-02T15:04:05Z07:00"))
+	store, closeStore := stateStoreOrExit(*statePath)
+	defer closeStore()
+	leases, err := store.AllLeases(context.Background())
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
 	}
+	printAdapterStatuses(adapterStatusViews(leases, nil))
+}
+
+func runtimeActionsCmd(args []string) {
+	fs := flag.NewFlagSet("kliq runtime actions", flag.ExitOnError)
+	statePath := fs.String("state", defaultStatePath, "path to KLIQ local SQLite state")
+	if err := fs.Parse(args); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	store, closeStore := stateStoreOrExit(*statePath)
+	defer closeStore()
+	leases, err := store.AllLeases(context.Background())
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	printRuntimeActions(runtimeActionViews(leases))
+}
+
+func runtimeJournalCmd(args []string) {
+	fs := flag.NewFlagSet("kliq runtime journal", flag.ExitOnError)
+	statePath := fs.String("state", defaultStatePath, "path to KLIQ local SQLite state")
+	actionID := fs.String("action-id", "", "runtime action id")
+	if err := fs.Parse(args); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	if *actionID == "" {
+		fmt.Fprintln(os.Stderr, "kliq runtime journal requires --action-id")
+		os.Exit(2)
+	}
+	store, closeStore := stateStoreOrExit(*statePath)
+	defer closeStore()
+	entries, err := store.JournalEntries(context.Background(), *actionID)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	printJournalEntries(journalEntryViews(entries))
+}
+
+func auditPendingCmd(args []string) {
+	fs := flag.NewFlagSet("kliq audit pending", flag.ExitOnError)
+	statePath := fs.String("state", defaultStatePath, "path to KLIQ local SQLite state")
+	if err := fs.Parse(args); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	store, closeStore := stateStoreOrExit(*statePath)
+	defer closeStore()
+	records, err := store.PendingAudits(context.Background())
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	printAuditRecords(auditRecordViews(records))
 }
 
 func managerOrExit(statePath, keyPath string, registry kliqruntime.AdapterRuntimeRegistry) (kliqruntime.Manager, func()) {
@@ -277,17 +373,22 @@ func managerOrExit(statePath, keyPath string, registry kliqruntime.AdapterRuntim
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	store, err := actionstate.OpenSQLite(statePath)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
+	store, closeStore := stateStoreOrExit(statePath)
 	manager := kliqruntime.Manager{
 		Store:    store,
 		Verifier: verifier,
 		Registry: registry,
 	}
-	return manager, func() {
+	return manager, closeStore
+}
+
+func stateStoreOrExit(statePath string) (*actionstate.SQLiteStore, func()) {
+	store, err := actionstate.OpenSQLite(statePath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	return store, func() {
 		_ = store.Close()
 	}
 }
@@ -328,4 +429,111 @@ func redactedHash(value string) string {
 	}
 	sum := sha256.Sum256([]byte(value))
 	return "sha256:" + hex.EncodeToString(sum[:])[:16]
+}
+
+func printReconcileResult(result kliqruntime.ReconcileResult) {
+	fmt.Printf("  active: %d\n", result.Active)
+	fmt.Printf("  expired: %d\n", result.Expired)
+	fmt.Printf("  unknown: %d\n", result.Unknown)
+	for _, adapter := range result.AdapterResults {
+		fmt.Printf("  adapter: %s active=%d expired=%d unknown=%d\n", adapter.AdapterID, adapter.Active, adapter.Expired, adapter.Unknown)
+	}
+	for _, finding := range result.Findings {
+		fmt.Printf("  finding: %s\n", finding)
+	}
+}
+
+func printStatusSnapshot(snapshot statusSnapshot) {
+	fmt.Println("kliq status")
+	fmt.Printf("  state: %s\n", snapshot.StatePath)
+	if snapshot.Bundle != nil {
+		printBundleStatus(*snapshot.Bundle)
+	} else {
+		fmt.Println("  bundle: unavailable")
+	}
+	fmt.Printf("  runtime_actions: %d\n", len(snapshot.RuntimeActions))
+	fmt.Printf("  pending_audit_records: %d\n", snapshot.PendingAuditCount)
+	printAdapterStatuses(snapshot.Adapters)
+}
+
+func printBundleStatus(bundle bundleStatusView) {
+	fmt.Println("bundle status")
+	fmt.Printf("  bundle_id: %s\n", bundle.BundleID)
+	fmt.Printf("  policy_id: %s\n", bundle.PolicyID)
+	fmt.Printf("  source_commit: %s\n", bundle.SourceCommit)
+	fmt.Printf("  correlation_id: %s\n", bundle.CorrelationID)
+	fmt.Printf("  key_id: %s\n", bundle.KeyID)
+	fmt.Printf("  payload_sha256: %s\n", bundle.PayloadSHA256)
+	fmt.Printf("  bundle_source_sha256: %s\n", bundle.BundleSourceSHA256)
+	fmt.Printf("  expires_at: %s\n", bundle.ExpiresAt)
+	fmt.Printf("  verified_at: %s\n", bundle.VerifiedAt)
+}
+
+func printAdapterStatuses(adapters []adapterStatusView) {
+	fmt.Println("adapters status")
+	if len(adapters) == 0 {
+		fmt.Println("  none")
+		return
+	}
+	for _, adapter := range adapters {
+		fmt.Printf("  adapter: %s\n", adapter.AdapterID)
+		fmt.Printf("    registered: %t\n", adapter.Registered)
+		fmt.Printf("    health: %s\n", adapter.Health)
+		fmt.Printf("    leases: %d\n", adapter.Leases)
+		fmt.Printf("    active: %d\n", adapter.Active)
+		fmt.Printf("    expired: %d\n", adapter.Expired)
+		fmt.Printf("    unknown: %d\n", adapter.Unknown)
+	}
+}
+
+func printRuntimeActions(actions []runtimeActionView) {
+	fmt.Println("runtime actions")
+	if len(actions) == 0 {
+		fmt.Println("  none")
+		return
+	}
+	for _, action := range actions {
+		fmt.Printf("  action: %s\n", action.RuntimeActionID)
+		fmt.Printf("    plan_id: %s\n", action.PlanID)
+		fmt.Printf("    adapter_id: %s\n", action.AdapterID)
+		fmt.Printf("    capability_id: %s\n", action.CapabilityID)
+		fmt.Printf("    correlation_id: %s\n", action.CorrelationID)
+		fmt.Printf("    action_type: %s\n", action.ActionType)
+		fmt.Printf("    target_scope: %s\n", action.TargetScope)
+		fmt.Printf("    target_key_sha256: %s\n", action.TargetKeySHA256)
+		fmt.Printf("    idempotency_key_sha256: %s\n", action.IdempotencyKeySHA256)
+		fmt.Printf("    status: %s\n", action.Status)
+		fmt.Printf("    expires_at: %s\n", action.ExpiresAt)
+	}
+}
+
+func printJournalEntries(entries []journalEntryView) {
+	fmt.Println("runtime journal")
+	if len(entries) == 0 {
+		fmt.Println("  none")
+		return
+	}
+	for _, entry := range entries {
+		fmt.Printf("  entry: %s\n", entry.ID)
+		fmt.Printf("    runtime_action_id: %s\n", entry.RuntimeActionID)
+		fmt.Printf("    event: %s\n", entry.Event)
+		fmt.Printf("    status: %s\n", entry.Status)
+		fmt.Printf("    message_sha256: %s\n", entry.MessageSHA256)
+		fmt.Printf("    created_at: %s\n", entry.CreatedAt)
+	}
+}
+
+func printAuditRecords(records []auditRecordView) {
+	fmt.Println("pending audit")
+	if len(records) == 0 {
+		fmt.Println("  none")
+		return
+	}
+	for _, record := range records {
+		fmt.Printf("  record: %s\n", record.ID)
+		fmt.Printf("    runtime_action_id: %s\n", record.RuntimeActionID)
+		fmt.Printf("    status: %s\n", record.Status)
+		fmt.Printf("    payload_sha256: %s\n", record.PayloadSHA256)
+		fmt.Printf("    created_at: %s\n", record.CreatedAt)
+	}
 }

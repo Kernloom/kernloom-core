@@ -349,6 +349,40 @@ func TestManagerReconcilesExpiredActionAfterRestart(t *testing.T) {
 	}
 }
 
+func TestManagerReconcileDryRunDoesNotMutateExpiredLease(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC)
+	store := openTestStore(t)
+	defer store.Close()
+	lease := testLeaseFor(testAdapterID, testCapabilityID, "source-dry-run", now.Add(-time.Second), now)
+	if err := store.UpsertLease(ctx, lease); err != nil {
+		t.Fatal(err)
+	}
+	manager := Manager{Store: store, Now: func() time.Time { return now }}
+
+	result, err := manager.ReconcileDryRun(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Expired != 1 || result.Active != 0 || result.Unknown != 0 {
+		t.Fatalf("expected one expired lease in dry run, got %#v", result)
+	}
+	after, err := store.LeaseByID(ctx, lease.RuntimeActionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Status != domain.RuntimeActionActive {
+		t.Fatalf("dry run mutated lease status, got %#v", after)
+	}
+	entries, err := store.JournalEntries(ctx, lease.RuntimeActionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("dry run wrote journal entries: %#v", entries)
+	}
+}
+
 func TestReconcileContinuesWhenOneAdapterIsMissing(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC)
