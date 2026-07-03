@@ -31,10 +31,17 @@ make build
 Slice 2 adds an authenticated Forge API and an async simulation job shell. Start the dev services first, then run the API and worker against Redis:
 
 ```sh
-podman compose -f docker-compose.dev.yml up -d redis
+podman compose -f docker-compose.dev.yml up -d postgres redis
 make build
 
-./bin/forge api --addr :8080 --queue redis --redis-addr 127.0.0.1:6379 --dev-tokens
+./bin/forge api \
+  --addr :8080 \
+  --queue redis \
+  --redis-addr 127.0.0.1:6379 \
+  --management-store postgres \
+  --management-postgres-dsn 'postgres://kernloom:kernloom-dev-password@127.0.0.1:5432/kernloom?sslmode=disable' \
+  --kliq-service-token-secret 'dev-kliq-service-token-secret' \
+  --dev-tokens
 ```
 
 Dev bearer tokens use this local format:
@@ -60,9 +67,23 @@ The API also accepts signed JWTs with OIDC/OAuth2-style claims when started with
 
 ## Managed KLIQ Assignments
 
-Slice 5.8 adds the first Forge-managed KLIQ control plane skeleton. Forge can
-issue enrollment tokens, register KLIQ nodes, sign assignments, expose the
-latest assignment to KLIQ and accept heartbeat/status reports.
+Slice 5.9 hardens the Forge-managed KLIQ control plane. The production path uses
+a persistent Postgres management store, hashed single-use enrollment tokens,
+bound KLIQ identity material, signed assignments, KLIQ service authentication,
+revocation state and management audit events. The in-memory store and manual
+assignment endpoint are dev/smoke-test only and require `--dev-management`.
+
+For a throwaway smoke test without Postgres, start Forge explicitly in dev mode:
+
+```sh
+./bin/forge api \
+  --addr :8080 \
+  --queue memory \
+  --management-store memory \
+  --dev-management \
+  --kliq-service-token-secret 'dev-kliq-service-token-secret' \
+  --dev-tokens
+```
 
 ```sh
 OPERATOR_TOKEN='dev:ops:operator:acme:prod:prod'
@@ -73,19 +94,29 @@ curl -sS -H "Authorization: Bearer ${OPERATOR_TOKEN}" \
   http://127.0.0.1:8080/v1/kliq/enrollment-tokens
 
 curl -sS -H 'Content-Type: application/json' \
-  -d '{"enrollment_token":"<secret_token>","node_id":"node-1","environment":"prod","stage":"prod","scope":"edge-prod","version":"dev","trust_key_id":"forge-management-dev-local","adapter_inventory":["kernloom.adapter.klshield"],"capabilities":["klshield.runtime.source_mitigation"]}' \
+  -d '{"enrollment_token":"<secret_token>","node_id":"node-1","environment":"prod","stage":"prod","scope":"edge-prod","version":"dev","trust_key_id":"forge-management-dev-local","public_key_pem":"-----BEGIN PUBLIC KEY-----dev-----END PUBLIC KEY-----","adapter_inventory":["kernloom.adapter.klshield"],"capabilities":["klshield.runtime.source_mitigation"]}' \
   http://127.0.0.1:8080/v1/kliq/enroll
 ```
 
-Assignments are signed by Forge with `--management-signing-key` and must carry
-the target `kliq_id`, environment, stage, scope, source commit, trust key,
-monotonic assignment version and artifact digests. KLIQ verifies the signed
-assignment and embedded RuntimeBundle artifact locally before activation:
+Use the returned `registration.kliq_id` and `service_token`. Assignments are
+planned by Forge from the KLIQ registration and approved artifacts; arbitrary
+manual assignment JSON is no longer a production endpoint.
+
+```sh
+curl -sS -H "Authorization: Bearer ${OPERATOR_TOKEN}" \
+  -H 'Content-Type: application/json' \
+  -d '{"kliq_id":"<kliq_id>","source_commit":"<source_commit>","expires_at":"2026-07-03T23:59:59Z","artifacts":[{"artifact_type":"runtime_bundle","artifact_id":"runtime_bundle.manual","envelope":<signed-runtime-bundle-json>}]} ' \
+  http://127.0.0.1:8080/v1/kliq/assignments
+```
+
+KLIQ pulls its assignment with its own service identity, not the operator token.
+It verifies the signed assignment and embedded RuntimeBundle artifact locally
+before activation:
 
 ```sh
 ./bin/kliq load-managed-bundle \
   --assignment-url http://127.0.0.1:8080 \
-  --bearer-token "${OPERATOR_TOKEN}" \
+  --bearer-token "<service_token>" \
   --kliq-id "<kliq_id>" \
   --environment prod \
   --stage prod \

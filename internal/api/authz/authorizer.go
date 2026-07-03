@@ -23,6 +23,7 @@ const (
 	RoleOperator            = "operator"
 	RoleReadOnlyViewer      = "read-only-viewer"
 	RoleBreakGlassApprover  = "break-glass-approver"
+	RoleKLIQService         = "kliq-service"
 )
 
 type Request struct {

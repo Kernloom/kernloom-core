@@ -87,12 +87,14 @@ func TestKLIQEnrollmentAssignmentHeartbeatAndStatusFlow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	serviceIssuer := &authn.KLIQServiceTokenIssuer{Secret: []byte("test-kliq-service-secret")}
 	server := Server{
-		Authenticator:  authn.DevTokenVerifier{},
+		Authenticator:  authn.Chain{authn.DevTokenVerifier{}, serviceIssuer},
 		Authorizer:     authz.Authorizer{},
 		Store:          jobs.NewMemoryStore(),
 		Management:     store,
 		ManagementSign: signer,
+		KLIQService:    serviceIssuer,
 	}
 	handler := server.Handler()
 	operatorToken := "Bearer dev:ops:operator:acme:prod:prod"
@@ -113,37 +115,35 @@ func TestKLIQEnrollmentAssignmentHeartbeatAndStatusFlow(t *testing.T) {
 	}
 
 	enrollResp := httptest.NewRecorder()
-	enrollBody := `{"enrollment_token":"` + token.SecretToken + `","node_id":"node-1","environment":"prod","stage":"prod","scope":"edge-prod","version":"test","trust_key_id":"forge-management-dev-local","adapter_inventory":["kernloom.adapter.klshield"],"capabilities":["klshield.runtime.source_mitigation"]}`
+	enrollBody := `{"enrollment_token":"` + token.SecretToken + `","node_id":"node-1","environment":"prod","stage":"prod","scope":"edge-prod","version":"test","trust_key_id":"forge-management-dev-local","public_key_pem":"-----BEGIN PUBLIC KEY-----test-----END PUBLIC KEY-----","adapter_inventory":["kernloom.adapter.klshield"],"capabilities":["klshield.runtime.source_mitigation"]}`
 	handler.ServeHTTP(enrollResp, httptest.NewRequest(http.MethodPost, "/v1/kliq/enroll", bytes.NewBufferString(enrollBody)))
 	if enrollResp.Code != http.StatusCreated {
 		t.Fatalf("expected enrollment created, got %d: %s", enrollResp.Code, enrollResp.Body.String())
 	}
-	var registration domain.KLIQRegistration
-	if err := json.Unmarshal(enrollResp.Body.Bytes(), &registration); err != nil {
+	var enrollment enrollmentResponse
+	if err := json.Unmarshal(enrollResp.Body.Bytes(), &enrollment); err != nil {
 		t.Fatal(err)
 	}
+	registration := enrollment.Registration
 	if registration.KLIQID == "" || registration.Identity.TrustKeyID != "forge-management-dev-local" {
 		t.Fatalf("unexpected registration %#v", registration)
 	}
+	if enrollment.ServiceToken == "" || registration.Identity.PublicKeyPEM == "" {
+		t.Fatalf("expected service token and bound public key, got %#v", enrollment)
+	}
 
 	artifactEnvelope := json.RawMessage(`{"kind":"SignedEnvelope","payload":"runtime"}`)
-	assignment := domain.KLIQAssignment{
-		AssignmentVersion: 1,
-		KLIQID:            registration.KLIQID,
-		Environment:       "prod",
-		Stage:             "prod",
-		Scope:             "edge-prod",
-		SourceCommit:      "abc123",
-		TrustKeyID:        "forge-management-dev-local",
-		CreatedAt:         time.Now().UTC(),
-		ExpiresAt:         time.Now().Add(time.Hour).UTC(),
+	plan := assignmentPlanRequest{
+		KLIQID:       registration.KLIQID,
+		SourceCommit: "abc123",
+		ExpiresAt:    time.Now().Add(time.Hour).UTC(),
 		Artifacts: []domain.KLIQAssignedArtifact{{
 			ArtifactType: "runtime_bundle",
 			ArtifactID:   "runtime_bundle.test",
 			Envelope:     artifactEnvelope,
 		}},
 	}
-	body, err := json.Marshal(assignment)
+	body, err := json.Marshal(plan)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,7 +164,7 @@ func TestKLIQEnrollmentAssignmentHeartbeatAndStatusFlow(t *testing.T) {
 
 	latestResp := httptest.NewRecorder()
 	latestReq := httptest.NewRequest(http.MethodGet, "/v1/kliq/assignments/"+registration.KLIQID+"/latest", nil)
-	latestReq.Header.Set("Authorization", operatorToken)
+	latestReq.Header.Set("Authorization", "Bearer "+enrollment.ServiceToken)
 	handler.ServeHTTP(latestResp, latestReq)
 	if latestResp.Code != http.StatusOK {
 		t.Fatalf("expected latest assignment, got %d: %s", latestResp.Code, latestResp.Body.String())
@@ -172,7 +172,7 @@ func TestKLIQEnrollmentAssignmentHeartbeatAndStatusFlow(t *testing.T) {
 
 	heartbeatResp := httptest.NewRecorder()
 	heartbeatReq := httptest.NewRequest(http.MethodPost, "/v1/kliq/heartbeat", bytes.NewBufferString(`{"kliq_id":"`+registration.KLIQID+`","environment":"prod","stage":"prod","scope":"edge-prod","assignment_version":1,"status":"ok"}`))
-	heartbeatReq.Header.Set("Authorization", operatorToken)
+	heartbeatReq.Header.Set("Authorization", "Bearer "+enrollment.ServiceToken)
 	handler.ServeHTTP(heartbeatResp, heartbeatReq)
 	if heartbeatResp.Code != http.StatusAccepted {
 		t.Fatalf("expected heartbeat accepted, got %d: %s", heartbeatResp.Code, heartbeatResp.Body.String())
@@ -180,7 +180,7 @@ func TestKLIQEnrollmentAssignmentHeartbeatAndStatusFlow(t *testing.T) {
 
 	statusResp := httptest.NewRecorder()
 	statusReq := httptest.NewRequest(http.MethodPost, "/v1/kliq/status-reports", bytes.NewBufferString(`{"kliq_id":"`+registration.KLIQID+`","environment":"prod","stage":"prod","scope":"edge-prod","assignment_version":1,"status":"ok","runtime_actions":1,"pending_audits":0}`))
-	statusReq.Header.Set("Authorization", operatorToken)
+	statusReq.Header.Set("Authorization", "Bearer "+enrollment.ServiceToken)
 	handler.ServeHTTP(statusResp, statusReq)
 	if statusResp.Code != http.StatusAccepted {
 		t.Fatalf("expected status report accepted, got %d: %s", statusResp.Code, statusResp.Body.String())
@@ -227,6 +227,79 @@ func TestLatestAssignmentReadEnforcesRegisteredScope(t *testing.T) {
 	}
 }
 
+func TestKLIQServiceCannotFetchAnotherKLIQAssignment(t *testing.T) {
+	store := management.NewMemoryStore()
+	first := testRegistration("kliq.first", "node-1")
+	second := testRegistration("kliq.second", "node-2")
+	if err := store.Register(t.Context(), first); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Register(t.Context(), second); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveAssignment(t.Context(), second.KLIQID, 1, signing.SignedEnvelope{PayloadSHA256: "sha256:assignment"}); err != nil {
+		t.Fatal(err)
+	}
+	issuer := &authn.KLIQServiceTokenIssuer{Secret: []byte("test-kliq-service-secret")}
+	token, err := issuer.Issue(first.KLIQID, first.Environment, first.Stage, first.Scope, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := Server{
+		Authenticator:  authn.Chain{authn.DevTokenVerifier{}, issuer},
+		Authorizer:     authz.Authorizer{},
+		Store:          jobs.NewMemoryStore(),
+		Management:     store,
+		ManagementSign: testManagementSigner(t),
+		KLIQService:    issuer,
+	}
+	req := httptest.NewRequest(http.MethodGet, "/v1/kliq/assignments/"+second.KLIQID+"/latest", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected forbidden for cross-KLIQ assignment pull, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestRevokedKLIQCannotFetchAssignment(t *testing.T) {
+	store := management.NewMemoryStore()
+	registration := testRegistration("kliq.revoked", "node-revoked")
+	if err := store.Register(t.Context(), registration); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveAssignment(t.Context(), registration.KLIQID, 1, signing.SignedEnvelope{PayloadSHA256: "sha256:assignment"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RevokeKLIQ(t.Context(), registration.KLIQID, "test revocation", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	issuer := &authn.KLIQServiceTokenIssuer{Secret: []byte("test-kliq-service-secret")}
+	token, err := issuer.Issue(registration.KLIQID, registration.Environment, registration.Stage, registration.Scope, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := Server{
+		Authenticator:  authn.Chain{issuer},
+		Authorizer:     authz.Authorizer{},
+		Store:          jobs.NewMemoryStore(),
+		Management:     store,
+		ManagementSign: testManagementSigner(t),
+		KLIQService:    issuer,
+	}
+	req := httptest.NewRequest(http.MethodGet, "/v1/kliq/assignments/"+registration.KLIQID+"/latest", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected forbidden for revoked KLIQ, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestHeartbeatAndStatusMustMatchRegistrationScope(t *testing.T) {
 	store := management.NewMemoryStore()
 	registration := domain.KLIQRegistration{
@@ -262,6 +335,31 @@ func TestHeartbeatAndStatusMustMatchRegistrationScope(t *testing.T) {
 	handler.ServeHTTP(statusResp, statusReq)
 	if statusResp.Code != http.StatusBadRequest {
 		t.Fatalf("expected status scope mismatch rejection, got %d: %s", statusResp.Code, statusResp.Body.String())
+	}
+}
+
+func testRegistration(kliqID, nodeID string) domain.KLIQRegistration {
+	return domain.KLIQRegistration{
+		RegistrationID: "registration." + kliqID,
+		KLIQID:         kliqID,
+		NodeID:         nodeID,
+		Environment:    "prod",
+		Stage:          "prod",
+		Scope:          "edge-prod",
+		Status:         "active",
+		RegisteredAt:   time.Now().UTC(),
+		Identity: domain.KLIQIdentity{
+			IdentityID:   "identity." + kliqID,
+			KLIQID:       kliqID,
+			NodeID:       nodeID,
+			Environment:  "prod",
+			Stage:        "prod",
+			Scope:        "edge-prod",
+			TrustKeyID:   "forge-management-dev-local",
+			PublicKeyPEM: "public-key",
+			Status:       "active",
+			IssuedAt:     time.Now().UTC(),
+		},
 	}
 }
 

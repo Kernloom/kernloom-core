@@ -22,6 +22,8 @@ type Server struct {
 	Store          jobs.Store
 	Management     management.Store
 	ManagementSign signing.Signer
+	KLIQService    *authn.KLIQServiceTokenIssuer
+	DevManagement  bool
 }
 
 type SimulationJobRequest struct {
@@ -40,9 +42,14 @@ func (s Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/simulation-jobs", s.requireAuth(s.createSimulationJob))
 	mux.HandleFunc("GET /v1/jobs/{id}", s.requireAuth(s.getJob))
 	mux.HandleFunc("POST /v1/kliq/enrollment-tokens", s.requireAuth(s.createEnrollmentToken))
+	mux.HandleFunc("POST /v1/kliq/enrollment-tokens/{token_id}/revoke", s.requireAuth(s.revokeEnrollmentToken))
 	mux.HandleFunc("POST /v1/kliq/enroll", s.enrollKLIQ)
-	mux.HandleFunc("POST /v1/kliq/assignments", s.requireAuth(s.createKLIQAssignment))
+	mux.HandleFunc("POST /v1/kliq/assignments", s.requireAuth(s.planKLIQAssignment))
+	mux.HandleFunc("POST /v1/kliq/dev/assignments", s.requireAuth(s.createDevKLIQAssignment))
 	mux.HandleFunc("GET /v1/kliq/assignments/{kliq_id}/latest", s.requireAuth(s.latestKLIQAssignment))
+	mux.HandleFunc("POST /v1/kliq/assignments/{kliq_id}/{version}/revoke", s.requireAuth(s.revokeKLIQAssignment))
+	mux.HandleFunc("POST /v1/kliq/registrations/{kliq_id}/revoke", s.requireAuth(s.revokeKLIQRegistration))
+	mux.HandleFunc("POST /v1/kliq/trust-bundles/{key_id}/revoke", s.requireAuth(s.revokeTrustBundle))
 	mux.HandleFunc("POST /v1/kliq/heartbeat", s.requireAuth(s.recordKLIQHeartbeat))
 	mux.HandleFunc("POST /v1/kliq/status-reports", s.requireAuth(s.recordKLIQStatusReport))
 	mux.HandleFunc("GET /v1/kliq/status-reports/{kliq_id}", s.requireAuth(s.getKLIQStatusReport))

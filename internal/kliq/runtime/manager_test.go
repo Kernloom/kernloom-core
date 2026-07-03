@@ -620,6 +620,7 @@ func managedTestAssignment(now time.Time, trustKeyID string, version int64, runt
 		Scope:             "edge-prod",
 		SourceCommit:      "abc123",
 		TrustKeyID:        trustKeyID,
+		TrustBundleRef:    trustKeyID,
 		CreatedAt:         now,
 		ExpiresAt:         now.Add(time.Hour),
 		Artifacts: []domain.KLIQAssignedArtifact{{

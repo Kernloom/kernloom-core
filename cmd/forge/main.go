@@ -4,8 +4,10 @@
 package main
 
 import (
+	"context"
 	"crypto/rsa"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/pem"
 	"flag"
 	"fmt"
@@ -15,6 +17,7 @@ import (
 	"time"
 
 	"github.com/kernloom/kernloom-core/internal/api/authn"
+	"github.com/kernloom/kernloom-core/internal/core/domain"
 	"github.com/kernloom/kernloom-core/internal/core/signing"
 	"github.com/kernloom/kernloom-core/internal/core/version"
 	forgeapi "github.com/kernloom/kernloom-core/internal/forge/api"
@@ -89,6 +92,10 @@ func api(args []string) {
 	oidcHMACSecret := fs.String("oidc-hmac-secret", "", "HS256 secret for local OIDC/OAuth2 JWT verification")
 	oidcRSAPublicKey := fs.String("oidc-rsa-public-key", "", "PEM-encoded RSA public key for RS256 OIDC/OAuth2 JWT verification")
 	managementSigningKey := fs.String("management-signing-key", "./var/kernloom/forge/management.ed25519.json", "dev-local signing key for KLIQ assignments")
+	managementStoreKind := fs.String("management-store", "postgres", "KLIQ management store backend: postgres or memory")
+	managementPostgresDSN := fs.String("management-postgres-dsn", "", "Postgres DSN for KLIQ management store")
+	devManagement := fs.Bool("dev-management", false, "enable explicit dev-only in-memory management store and manual assignment API")
+	kliqServiceTokenSecret := fs.String("kliq-service-token-secret", "", "HMAC secret for dev/local KLIQ service tokens; production should replace with mTLS-ready identity")
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
@@ -118,11 +125,34 @@ func api(args []string) {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
+	managementBackend, err := managementStore(*managementStoreKind, *managementPostgresDSN, *devManagement)
+	if err != nil {
+		logger.Error("forge_management_store_failed", "error", err.Error())
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	if err := seedManagementTrustBundle(managementBackend, managementSigner); err != nil {
+		logger.Error("forge_management_trust_bundle_failed", "error", err.Error())
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	var kliqService *authn.KLIQServiceTokenIssuer
+	if *kliqServiceTokenSecret != "" {
+		kliqService = &authn.KLIQServiceTokenIssuer{Secret: []byte(*kliqServiceTokenSecret)}
+	} else if *managementStoreKind == "postgres" {
+		fmt.Fprintln(os.Stderr, "forge api production management requires --kliq-service-token-secret until mTLS service auth is wired")
+		os.Exit(2)
+	}
+	if kliqService != nil {
+		authenticator = append(authenticator, kliqService)
+	}
 	server := forgeapi.Server{
 		Authenticator:  authenticator,
 		Store:          store,
-		Management:     management.NewMemoryStore(),
+		Management:     managementBackend,
 		ManagementSign: managementSigner,
+		KLIQService:    kliqService,
+		DevManagement:  *devManagement,
 	}
 	logger.Info("forge_api_starting", "addr", *addr, "queue", *queueKind)
 	if err := http.ListenAndServe(*addr, server.Handler()); err != nil {
@@ -186,4 +216,34 @@ func jobStore(kind, redisAddr string) (jobs.Store, error) {
 	default:
 		return nil, fmt.Errorf("unsupported queue %q", kind)
 	}
+}
+
+func managementStore(kind, postgresDSN string, devManagement bool) (management.Store, error) {
+	switch kind {
+	case "memory":
+		if !devManagement {
+			return nil, fmt.Errorf("memory management store requires --dev-management")
+		}
+		logger.Warn("forge_management_memory_store_enabled", "message", "in-memory KLIQ management is dev/smoke-test only")
+		return management.NewMemoryStore(), nil
+	case "postgres":
+		return management.OpenPostgres(context.Background(), postgresDSN)
+	default:
+		return nil, fmt.Errorf("unsupported management store %q", kind)
+	}
+}
+
+func seedManagementTrustBundle(store management.Store, signer *signing.DevLocalSigner) error {
+	if signer == nil {
+		return nil
+	}
+	expiresAt := time.Now().UTC().Add(24 * time.Hour)
+	return store.SaveTrustBundle(context.Background(), domain.TrustBundle{
+		KeyID:     signer.KeyID,
+		PublicKey: base64.StdEncoding.EncodeToString(signer.PublicKey),
+		Purpose:   "kliq_assignment",
+		Status:    "active",
+		ExpiresAt: expiresAt,
+		Issuer:    "forge-management-dev-local",
+	})
 }

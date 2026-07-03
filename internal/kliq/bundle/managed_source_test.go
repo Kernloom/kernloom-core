@@ -162,6 +162,7 @@ func managedSourceTestAssignment(now time.Time, runtimeEnvelope json.RawMessage)
 		Scope:             "edge-prod",
 		SourceCommit:      "abc123",
 		TrustKeyID:        "forge-management-dev-local",
+		TrustBundleRef:    "forge-management-dev-local",
 		CreatedAt:         now,
 		ExpiresAt:         now.Add(time.Hour),
 		Artifacts: []domain.KLIQAssignedArtifact{{

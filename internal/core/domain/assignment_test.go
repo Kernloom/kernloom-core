@@ -86,6 +86,7 @@ func validAssignment(now time.Time) KLIQAssignment {
 		Scope:             "node-17",
 		SourceCommit:      "abc123",
 		TrustKeyID:        "dev-local",
+		TrustBundleRef:    "dev-local",
 		CreatedAt:         now,
 		ExpiresAt:         now.Add(time.Hour),
 		SignatureValid:    true,

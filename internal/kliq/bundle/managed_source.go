@@ -25,6 +25,7 @@ type ManagedAssignmentSource struct {
 	Stage                   string
 	Scope                   string
 	TrustKeyID              string
+	TrustBundle             domain.TrustBundle
 	ActiveAssignmentVersion int64
 	ActiveAssignmentDigest  string
 	Verifier                signing.Verifier
@@ -126,6 +127,9 @@ func (s *ManagedAssignmentSource) verifyAssignment(ctx context.Context, envelope
 	if assignment.TrustKeyID != "" && assignment.TrustKeyID != result.KeyID {
 		return domain.KLIQAssignment{}, fmt.Errorf("assignment trust key %q does not match envelope key %q", assignment.TrustKeyID, result.KeyID)
 	}
+	if err := s.validateTrustBundle(assignment, result); err != nil {
+		return domain.KLIQAssignment{}, err
+	}
 	assignment.SignatureValid = true
 	if err := domain.ValidateAssignedArtifactDigests(assignment); err != nil {
 		return domain.KLIQAssignment{}, err
@@ -144,4 +148,23 @@ func (s *ManagedAssignmentSource) verifyAssignment(ctx context.Context, envelope
 		return domain.KLIQAssignment{}, err
 	}
 	return assignment, nil
+}
+
+func (s *ManagedAssignmentSource) validateTrustBundle(assignment domain.KLIQAssignment, result signing.VerificationResult) error {
+	if s.TrustBundle.KeyID == "" {
+		return nil
+	}
+	if s.TrustBundle.KeyID != assignment.TrustBundleRef {
+		return fmt.Errorf("assignment trust bundle %q does not match local trust bundle %q", assignment.TrustBundleRef, s.TrustBundle.KeyID)
+	}
+	if s.TrustBundle.KeyID != result.KeyID {
+		return fmt.Errorf("assignment signing key %q does not match trust bundle key %q", result.KeyID, s.TrustBundle.KeyID)
+	}
+	if s.TrustBundle.Status != "active" {
+		return fmt.Errorf("trust bundle %q is %q", s.TrustBundle.KeyID, s.TrustBundle.Status)
+	}
+	if !s.TrustBundle.ExpiresAt.IsZero() && !s.TrustBundle.ExpiresAt.After(result.VerifiedAt) {
+		return fmt.Errorf("trust bundle %q is expired", s.TrustBundle.KeyID)
+	}
+	return nil
 }
