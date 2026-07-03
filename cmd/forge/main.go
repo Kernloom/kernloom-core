@@ -15,10 +15,12 @@ import (
 	"time"
 
 	"github.com/kernloom/kernloom-core/internal/api/authn"
+	"github.com/kernloom/kernloom-core/internal/core/signing"
 	"github.com/kernloom/kernloom-core/internal/core/version"
 	forgeapi "github.com/kernloom/kernloom-core/internal/forge/api"
 	"github.com/kernloom/kernloom-core/internal/forge/compiler"
 	"github.com/kernloom/kernloom-core/internal/forge/jobs"
+	"github.com/kernloom/kernloom-core/internal/forge/management"
 )
 
 var logger = slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{}))
@@ -86,6 +88,7 @@ func api(args []string) {
 	oidcAudience := fs.String("oidc-audience", "", "expected JWT audience")
 	oidcHMACSecret := fs.String("oidc-hmac-secret", "", "HS256 secret for local OIDC/OAuth2 JWT verification")
 	oidcRSAPublicKey := fs.String("oidc-rsa-public-key", "", "PEM-encoded RSA public key for RS256 OIDC/OAuth2 JWT verification")
+	managementSigningKey := fs.String("management-signing-key", "./var/kernloom/forge/management.ed25519.json", "dev-local signing key for KLIQ assignments")
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
@@ -106,9 +109,17 @@ func api(args []string) {
 		fmt.Fprintln(os.Stderr, "forge api requires at least one auth provider")
 		os.Exit(2)
 	}
+	managementSigner, err := signing.LoadOrCreateDevLocalSigner(*managementSigningKey, "forge-management-dev-local")
+	if err != nil {
+		logger.Error("forge_management_signer_failed", "error", err.Error())
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
 	server := forgeapi.Server{
-		Authenticator: authenticator,
-		Store:         store,
+		Authenticator:  authenticator,
+		Store:          store,
+		Management:     management.NewMemoryStore(),
+		ManagementSign: managementSigner,
 	}
 	logger.Info("forge_api_starting", "addr", *addr, "queue", *queueKind)
 	if err := http.ListenAndServe(*addr, server.Handler()); err != nil {

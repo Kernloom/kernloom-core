@@ -32,6 +32,10 @@ func main() {
 		loadBundle(os.Args[2:])
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "load-managed-bundle" {
+		loadManagedBundle(os.Args[2:])
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "execute-action" {
 		executeAction(os.Args[2:])
 		return
@@ -71,6 +75,7 @@ func main() {
 	fmt.Println(version.Binary("kliq"))
 	fmt.Println("usage: kliq verify-bundle --bundle path --key path")
 	fmt.Println("usage: kliq load-bundle --bundle path --key path [--state ./var/kernloom/kliq/state.db]")
+	fmt.Println("usage: kliq load-managed-bundle --assignment-url http://127.0.0.1:8080 --bearer-token token --kliq-id id --environment env --stage stage --scope scope --trust-key-id key --key path [--state ./var/kernloom/kliq/state.db]")
 	fmt.Println("usage: kliq execute-action --key path --adapter-id id --adapter-addr host:port --capability-id id --capability-grant-id id --decision-id id --action-type id --target-key value --reason text [--audit-id id|--derive-audit-id] [--state path] [--target-scope scope] [--ttl 1m] [--mode required] [--correlation-id id]")
 	fmt.Println("usage: kliq reconcile --key path --adapter-id id --adapter-addr host:port [--state ./var/kernloom/kliq/state.db] [--dry-run]")
 	fmt.Println("usage: kliq status [--state ./var/kernloom/kliq/state.db]")
@@ -141,6 +146,53 @@ func loadBundle(args []string) {
 	fmt.Printf("  state: %s\n", *statePath)
 	fmt.Printf("  bundle_id: %s\n", record.BundleID)
 	fmt.Printf("  policy_id: %s\n", record.PolicyID)
+	fmt.Printf("  expires_at: %s\n", record.ExpiresAt.Format("2006-01-02T15:04:05Z07:00"))
+}
+
+func loadManagedBundle(args []string) {
+	fs := flag.NewFlagSet("kliq load-managed-bundle", flag.ExitOnError)
+	assignmentURL := fs.String("assignment-url", "", "Forge Assignment API base URL")
+	bearerToken := fs.String("bearer-token", "", "bearer token for Forge Assignment API")
+	kliqID := fs.String("kliq-id", "", "local KLIQ id")
+	environment := fs.String("environment", "", "local KLIQ environment")
+	stage := fs.String("stage", "", "local KLIQ stage")
+	scope := fs.String("scope", "", "local KLIQ scope")
+	trustKeyID := fs.String("trust-key-id", "", "trusted assignment signing key id")
+	activeVersion := fs.Int64("active-assignment-version", 0, "currently active assignment version")
+	keyPath := fs.String("key", "", "path to dev-local Ed25519 verifier key file")
+	statePath := fs.String("state", defaultStatePath, "path to KLIQ local SQLite state")
+	if err := fs.Parse(args); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	if *assignmentURL == "" || *bearerToken == "" || *kliqID == "" || *environment == "" || *stage == "" || *scope == "" || *trustKeyID == "" || *keyPath == "" {
+		fmt.Fprintln(os.Stderr, "kliq load-managed-bundle requires --assignment-url, --bearer-token, --kliq-id, --environment, --stage, --scope, --trust-key-id and --key")
+		os.Exit(2)
+	}
+	manager, closeStore := managerOrExit(*statePath, *keyPath, nil)
+	defer closeStore()
+	record, err := manager.LoadBundle(context.Background(), kliqbundle.ManagedAssignmentSource{
+		BaseURL:                 *assignmentURL,
+		BearerToken:             *bearerToken,
+		KLIQID:                  *kliqID,
+		Environment:             *environment,
+		Stage:                   *stage,
+		Scope:                   *scope,
+		TrustKeyID:              *trustKeyID,
+		ActiveAssignmentVersion: *activeVersion,
+		Verifier:                manager.Verifier,
+	})
+	if err != nil {
+		logError("kliq_load_managed_bundle_failed", "kliq_id", *kliqID, "environment", *environment, "stage", *stage, "error", err.Error())
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	logInfo("kliq_managed_runtime_bundle_loaded", "bundle_id", record.BundleID, "policy_id", record.PolicyID, "correlation_id", redactID(record.CorrelationID))
+	fmt.Println("managed runtime bundle loaded")
+	fmt.Printf("  state: %s\n", *statePath)
+	fmt.Printf("  bundle_id: %s\n", record.BundleID)
+	fmt.Printf("  policy_id: %s\n", record.PolicyID)
+	fmt.Printf("  source: %s\n", record.BundleSource)
 	fmt.Printf("  expires_at: %s\n", record.ExpiresAt.Format("2006-01-02T15:04:05Z07:00"))
 }
 

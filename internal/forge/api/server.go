@@ -11,13 +11,17 @@ import (
 
 	"github.com/kernloom/kernloom-core/internal/api/authn"
 	"github.com/kernloom/kernloom-core/internal/api/authz"
+	"github.com/kernloom/kernloom-core/internal/core/signing"
 	"github.com/kernloom/kernloom-core/internal/forge/jobs"
+	"github.com/kernloom/kernloom-core/internal/forge/management"
 )
 
 type Server struct {
-	Authenticator authn.Verifier
-	Authorizer    authz.Authorizer
-	Store         jobs.Store
+	Authenticator  authn.Verifier
+	Authorizer     authz.Authorizer
+	Store          jobs.Store
+	Management     management.Store
+	ManagementSign signing.Signer
 }
 
 type SimulationJobRequest struct {
@@ -35,6 +39,13 @@ func (s Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/me", s.requireAuth(s.me))
 	mux.HandleFunc("POST /v1/simulation-jobs", s.requireAuth(s.createSimulationJob))
 	mux.HandleFunc("GET /v1/jobs/{id}", s.requireAuth(s.getJob))
+	mux.HandleFunc("POST /v1/kliq/enrollment-tokens", s.requireAuth(s.createEnrollmentToken))
+	mux.HandleFunc("POST /v1/kliq/enroll", s.enrollKLIQ)
+	mux.HandleFunc("POST /v1/kliq/assignments", s.requireAuth(s.createKLIQAssignment))
+	mux.HandleFunc("GET /v1/kliq/assignments/{kliq_id}/latest", s.requireAuth(s.latestKLIQAssignment))
+	mux.HandleFunc("POST /v1/kliq/heartbeat", s.requireAuth(s.recordKLIQHeartbeat))
+	mux.HandleFunc("POST /v1/kliq/status-reports", s.requireAuth(s.recordKLIQStatusReport))
+	mux.HandleFunc("GET /v1/kliq/status-reports/{kliq_id}", s.requireAuth(s.getKLIQStatusReport))
 	return mux
 }
 

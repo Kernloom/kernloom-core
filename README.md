@@ -58,6 +58,45 @@ curl -sS -H "Authorization: Bearer ${TOKEN}" \
 
 The API also accepts signed JWTs with OIDC/OAuth2-style claims when started with `--oidc-hmac-secret`; the dev token provider can be disabled with `--dev-tokens=false`.
 
+## Managed KLIQ Assignments
+
+Slice 5.8 adds the first Forge-managed KLIQ control plane skeleton. Forge can
+issue enrollment tokens, register KLIQ nodes, sign assignments, expose the
+latest assignment to KLIQ and accept heartbeat/status reports.
+
+```sh
+OPERATOR_TOKEN='dev:ops:operator:acme:prod:prod'
+
+curl -sS -H "Authorization: Bearer ${OPERATOR_TOKEN}" \
+  -H 'Content-Type: application/json' \
+  -d '{"environment":"prod","stage":"prod","scope":"edge-prod"}' \
+  http://127.0.0.1:8080/v1/kliq/enrollment-tokens
+
+curl -sS -H 'Content-Type: application/json' \
+  -d '{"enrollment_token":"<secret_token>","node_id":"node-1","environment":"prod","stage":"prod","scope":"edge-prod","version":"dev","trust_key_id":"forge-management-dev-local","adapter_inventory":["kernloom.adapter.klshield"],"capabilities":["klshield.runtime.source_mitigation"]}' \
+  http://127.0.0.1:8080/v1/kliq/enroll
+```
+
+Assignments are signed by Forge with `--management-signing-key` and must carry
+the target `kliq_id`, environment, stage, scope, source commit, trust key,
+monotonic assignment version and artifact digests. KLIQ verifies the signed
+assignment and embedded RuntimeBundle artifact locally before activation:
+
+```sh
+./bin/kliq load-managed-bundle \
+  --assignment-url http://127.0.0.1:8080 \
+  --bearer-token "${OPERATOR_TOKEN}" \
+  --kliq-id "<kliq_id>" \
+  --environment prod \
+  --stage prod \
+  --scope edge-prod \
+  --trust-key-id forge-management-dev-local \
+  --key ./var/kernloom/forge/management.ed25519.json \
+  --state /tmp/kernloom-kliq-runtime/state.db
+```
+
+Standalone local bundle loading remains available through `kliq load-bundle`.
+
 ## KLIQ Local Runtime Lifecycle
 
 Slice 5.5 makes KLIQ runtime execution multi-adapter-safe. Slice 5.6 adds the real KLShield BPF backend on the adapter side. KLIQ loads a signed RuntimeBundle, builds a RuntimeActionPlan, creates adapter-specific leases and executes each supported PlannedRuntimeAction through an AdapterRuntimeRegistry. The lease and idempotency model no longer assumes one RuntimeDecision equals one adapter action.

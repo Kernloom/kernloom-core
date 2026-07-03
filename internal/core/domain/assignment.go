@@ -4,26 +4,116 @@
 package domain
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"time"
 )
 
+type KLIQEnrollmentToken struct {
+	TokenID     string    `json:"token_id"`
+	TokenSHA256 string    `json:"token_sha256"`
+	Environment string    `json:"environment"`
+	Stage       string    `json:"stage"`
+	Scope       string    `json:"scope"`
+	ExpiresAt   time.Time `json:"expires_at"`
+	CreatedAt   time.Time `json:"created_at"`
+	UsedAt      time.Time `json:"used_at,omitempty"`
+}
+
+type KLIQRegistration struct {
+	RegistrationID    string                `json:"registration_id"`
+	KLIQID            string                `json:"kliq_id"`
+	NodeID            string                `json:"node_id"`
+	Environment       string                `json:"environment"`
+	Stage             string                `json:"stage"`
+	Scope             string                `json:"scope"`
+	Version           string                `json:"version"`
+	AdapterInventory  []string              `json:"adapter_inventory,omitempty"`
+	Capabilities      []string              `json:"capabilities,omitempty"`
+	AttestationState  string                `json:"attestation_state,omitempty"`
+	Identity          KLIQIdentity          `json:"identity"`
+	ManagementProfile KLIQManagementProfile `json:"management_profile"`
+	RegisteredAt      time.Time             `json:"registered_at"`
+}
+
+type KLIQIdentity struct {
+	KLIQID      string `json:"kliq_id"`
+	NodeID      string `json:"node_id"`
+	Environment string `json:"environment"`
+	Stage       string `json:"stage"`
+	Scope       string `json:"scope"`
+	TrustKeyID  string `json:"trust_key_id"`
+}
+
+type KLIQManagementProfile struct {
+	ProfileID        string `json:"profile_id"`
+	Mode             string `json:"mode"`
+	PollInterval     string `json:"poll_interval"`
+	StatusEndpoint   string `json:"status_endpoint,omitempty"`
+	AssignmentSource string `json:"assignment_source,omitempty"`
+}
+
 type KLIQAssignment struct {
-	AssignmentID           string
-	AssignmentVersion      int64
-	KLIQID                 string
-	Environment            string
-	Stage                  string
-	Scope                  string
-	SourceCommit           string
-	TrustKeyID             string
-	CreatedAt              time.Time
-	ExpiresAt              time.Time
-	ApprovedRollback       bool
-	SignatureValid         bool
-	ManifestSigned         bool
-	ManifestDigest         string
-	ManifestSignatureValid bool
+	AssignmentID           string                 `json:"assignment_id"`
+	AssignmentVersion      int64                  `json:"assignment_version"`
+	KLIQID                 string                 `json:"kliq_id"`
+	Environment            string                 `json:"environment"`
+	Stage                  string                 `json:"stage"`
+	Scope                  string                 `json:"scope"`
+	SourceCommit           string                 `json:"source_commit"`
+	TrustKeyID             string                 `json:"trust_key_id"`
+	CreatedAt              time.Time              `json:"created_at"`
+	ExpiresAt              time.Time              `json:"expires_at"`
+	ApprovedRollback       bool                   `json:"approved_rollback"`
+	Artifacts              []KLIQAssignedArtifact `json:"artifacts,omitempty"`
+	SignatureValid         bool                   `json:"signature_valid,omitempty"`
+	ManifestSigned         bool                   `json:"manifest_signed,omitempty"`
+	ManifestDigest         string                 `json:"manifest_digest,omitempty"`
+	ManifestSignatureValid bool                   `json:"manifest_signature_valid,omitempty"`
+}
+
+type KLIQAssignedArtifact struct {
+	ArtifactType string          `json:"artifact_type"`
+	ArtifactID   string          `json:"artifact_id"`
+	SHA256       string          `json:"sha256"`
+	Envelope     json.RawMessage `json:"envelope"`
+}
+
+type KLIQHeartbeat struct {
+	KLIQID            string    `json:"kliq_id"`
+	Environment       string    `json:"environment"`
+	Stage             string    `json:"stage"`
+	Scope             string    `json:"scope"`
+	Version           string    `json:"version,omitempty"`
+	AssignmentVersion int64     `json:"assignment_version"`
+	Status            string    `json:"status"`
+	Findings          []string  `json:"findings,omitempty"`
+	ReportedAt        time.Time `json:"reported_at"`
+}
+
+type KLIQStatusReport struct {
+	KLIQID            string    `json:"kliq_id"`
+	Environment       string    `json:"environment"`
+	Stage             string    `json:"stage"`
+	Scope             string    `json:"scope"`
+	AssignmentVersion int64     `json:"assignment_version"`
+	Status            string    `json:"status"`
+	Findings          []string  `json:"findings,omitempty"`
+	RuntimeActions    int       `json:"runtime_actions"`
+	PendingAudits     int       `json:"pending_audits"`
+	ReportedAt        time.Time `json:"reported_at"`
+}
+
+type KLIQUpdatePlan struct {
+	KLIQID             string   `json:"kliq_id"`
+	CurrentVersion     int64    `json:"current_version"`
+	LatestVersion      int64    `json:"latest_version"`
+	UpdateAvailable    bool     `json:"update_available"`
+	AssignmentID       string   `json:"assignment_id,omitempty"`
+	AssignmentEnvelope any      `json:"assignment_envelope,omitempty"`
+	Findings           []string `json:"findings,omitempty"`
 }
 
 type KLIQAssignmentActivationContext struct {
@@ -84,4 +174,36 @@ func ValidateKLIQAssignmentActivation(assignment KLIQAssignment, ctx KLIQAssignm
 		return nil
 	}
 	return fmt.Errorf("kliq assignment %q is not newer than active assignment and is not an approved signed rollback", assignment.AssignmentID)
+}
+
+func RuntimeBundleArtifact(assignment KLIQAssignment) (KLIQAssignedArtifact, bool) {
+	for _, artifact := range assignment.Artifacts {
+		if artifact.ArtifactType == "runtime_bundle" {
+			return artifact, true
+		}
+	}
+	return KLIQAssignedArtifact{}, false
+}
+
+func ValidateAssignedArtifactDigests(assignment KLIQAssignment) error {
+	for _, artifact := range assignment.Artifacts {
+		if artifact.ArtifactType == "" {
+			return fmt.Errorf("kliq assignment %q contains artifact without artifact_type", assignment.AssignmentID)
+		}
+		if len(artifact.Envelope) == 0 {
+			return fmt.Errorf("kliq assignment %q artifact %q has no envelope", assignment.AssignmentID, artifact.ArtifactID)
+		}
+		if artifact.SHA256 == "" {
+			return fmt.Errorf("kliq assignment %q artifact %q has no sha256 digest", assignment.AssignmentID, artifact.ArtifactID)
+		}
+		if artifact.SHA256 != SHA256JSON(artifact.Envelope) {
+			return fmt.Errorf("kliq assignment %q artifact %q digest mismatch", assignment.AssignmentID, artifact.ArtifactID)
+		}
+	}
+	return nil
+}
+
+func SHA256JSON(data []byte) string {
+	sum := sha256.Sum256(data)
+	return "sha256:" + hex.EncodeToString(sum[:])
 }

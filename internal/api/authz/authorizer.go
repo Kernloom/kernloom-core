@@ -96,3 +96,20 @@ func JobReadRoles() []string {
 		RoleBreakGlassApprover,
 	}
 }
+
+func KLIQManageRoles() []string {
+	return []string{
+		RoleSecurityOwner,
+		RolePlatformOwner,
+		RoleOperator,
+	}
+}
+
+func KLIQReadRoles() []string {
+	return []string{
+		RoleSecurityOwner,
+		RolePlatformOwner,
+		RoleOperator,
+		RoleReadOnlyViewer,
+	}
+}
