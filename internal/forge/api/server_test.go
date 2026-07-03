@@ -194,3 +194,82 @@ func TestKLIQEnrollmentAssignmentHeartbeatAndStatusFlow(t *testing.T) {
 		t.Fatalf("expected status report read, got %d: %s", statusReadResp.Code, statusReadResp.Body.String())
 	}
 }
+
+func TestLatestAssignmentReadEnforcesRegisteredScope(t *testing.T) {
+	store := management.NewMemoryStore()
+	registration := domain.KLIQRegistration{
+		KLIQID:      "kliq.scope-test",
+		Environment: "prod",
+		Stage:       "prod",
+		Scope:       "edge-prod",
+	}
+	if err := store.Register(t.Context(), registration); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveAssignment(t.Context(), registration.KLIQID, 1, signing.SignedEnvelope{PayloadSHA256: "sha256:assignment"}); err != nil {
+		t.Fatal(err)
+	}
+	server := Server{
+		Authenticator:  authn.DevTokenVerifier{},
+		Authorizer:     authz.Authorizer{},
+		Store:          jobs.NewMemoryStore(),
+		Management:     store,
+		ManagementSign: testManagementSigner(t),
+	}
+	req := httptest.NewRequest(http.MethodGet, "/v1/kliq/assignments/"+registration.KLIQID+"/latest", nil)
+	req.Header.Set("Authorization", "Bearer dev:viewer:read-only-viewer:acme:dev:dev")
+	rec := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected forbidden for scope mismatch, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHeartbeatAndStatusMustMatchRegistrationScope(t *testing.T) {
+	store := management.NewMemoryStore()
+	registration := domain.KLIQRegistration{
+		KLIQID:      "kliq.scope-test",
+		Environment: "prod",
+		Stage:       "prod",
+		Scope:       "edge-prod",
+	}
+	if err := store.Register(t.Context(), registration); err != nil {
+		t.Fatal(err)
+	}
+	server := Server{
+		Authenticator:  authn.DevTokenVerifier{},
+		Authorizer:     authz.Authorizer{},
+		Store:          jobs.NewMemoryStore(),
+		Management:     store,
+		ManagementSign: testManagementSigner(t),
+	}
+	handler := server.Handler()
+	operatorToken := "Bearer dev:ops:operator:acme:prod:prod"
+
+	heartbeatResp := httptest.NewRecorder()
+	heartbeatReq := httptest.NewRequest(http.MethodPost, "/v1/kliq/heartbeat", bytes.NewBufferString(`{"kliq_id":"`+registration.KLIQID+`","environment":"prod","stage":"dev","scope":"edge-prod","assignment_version":1,"status":"ok"}`))
+	heartbeatReq.Header.Set("Authorization", operatorToken)
+	handler.ServeHTTP(heartbeatResp, heartbeatReq)
+	if heartbeatResp.Code != http.StatusBadRequest {
+		t.Fatalf("expected heartbeat scope mismatch rejection, got %d: %s", heartbeatResp.Code, heartbeatResp.Body.String())
+	}
+
+	statusResp := httptest.NewRecorder()
+	statusReq := httptest.NewRequest(http.MethodPost, "/v1/kliq/status-reports", bytes.NewBufferString(`{"kliq_id":"`+registration.KLIQID+`","environment":"prod","stage":"prod","scope":"other","assignment_version":1,"status":"ok"}`))
+	statusReq.Header.Set("Authorization", operatorToken)
+	handler.ServeHTTP(statusResp, statusReq)
+	if statusResp.Code != http.StatusBadRequest {
+		t.Fatalf("expected status scope mismatch rejection, got %d: %s", statusResp.Code, statusResp.Body.String())
+	}
+}
+
+func testManagementSigner(t *testing.T) *signing.DevLocalSigner {
+	t.Helper()
+	signer, err := signing.NewDevLocalSigner("forge-management-dev-local")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return signer
+}

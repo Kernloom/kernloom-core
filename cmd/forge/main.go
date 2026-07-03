@@ -83,7 +83,7 @@ func api(args []string) {
 	addr := fs.String("addr", ":8080", "HTTP listen address")
 	queueKind := fs.String("queue", "redis", "job queue backend: redis or memory")
 	redisAddr := fs.String("redis-addr", "127.0.0.1:6379", "Redis address")
-	enableDevTokens := fs.Bool("dev-tokens", true, "enable local dev token provider")
+	enableDevTokens := fs.Bool("dev-tokens", false, "enable local dev token provider")
 	oidcIssuer := fs.String("oidc-issuer", "", "expected JWT issuer")
 	oidcAudience := fs.String("oidc-audience", "", "expected JWT audience")
 	oidcHMACSecret := fs.String("oidc-hmac-secret", "", "HS256 secret for local OIDC/OAuth2 JWT verification")
@@ -104,6 +104,9 @@ func api(args []string) {
 		logger.Error("forge_authenticator_failed", "error", err.Error())
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
+	}
+	if *enableDevTokens {
+		logger.Warn("forge_dev_tokens_enabled", "message", "local dev bearer tokens are enabled; do not use this mode for production")
 	}
 	if len(authenticator) == 0 {
 		fmt.Fprintln(os.Stderr, "forge api requires at least one auth provider")

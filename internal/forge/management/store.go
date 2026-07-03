@@ -140,6 +140,12 @@ func (s *MemoryStore) SaveAssignment(_ context.Context, kliqID string, version i
 	if ok && version < existing.Version {
 		return fmt.Errorf("assignment version %d is older than existing version %d", version, existing.Version)
 	}
+	if ok && version == existing.Version {
+		if assignmentDigest(existing.Envelope) == assignmentDigest(envelope) {
+			return nil
+		}
+		return fmt.Errorf("assignment version %d already exists with different digest", version)
+	}
 	s.assignments[kliqID] = assignmentRecord{Version: version, Envelope: envelope}
 	return nil
 }
@@ -187,4 +193,12 @@ func (s *MemoryStore) StatusReport(_ context.Context, kliqID string) (domain.KLI
 func StableKLIQID(nodeID, environment, stage, scope string) string {
 	sum := sha256.Sum256([]byte(nodeID + "\x00" + environment + "\x00" + stage + "\x00" + scope))
 	return "kliq." + hex.EncodeToString(sum[:])[:16]
+}
+
+func assignmentDigest(envelope signing.SignedEnvelope) string {
+	if envelope.PayloadSHA256 != "" {
+		return envelope.PayloadSHA256
+	}
+	sum := sha256.Sum256(envelope.Payload)
+	return "sha256:" + hex.EncodeToString(sum[:])
 }

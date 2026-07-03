@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/kernloom/kernloom-core/internal/core/domain"
 	"github.com/kernloom/kernloom-core/internal/core/signing"
@@ -25,11 +26,43 @@ type ManagedAssignmentSource struct {
 	Scope                   string
 	TrustKeyID              string
 	ActiveAssignmentVersion int64
+	ActiveAssignmentDigest  string
 	Verifier                signing.Verifier
 	HTTPClient              *http.Client
+
+	assignment       domain.KLIQAssignment
+	assignmentDigest string
 }
 
-func (s ManagedAssignmentSource) Load(ctx context.Context) ([]byte, string, error) {
+type ManagedAssignmentActivation struct {
+	KLIQID            string
+	AssignmentID      string
+	AssignmentVersion int64
+	SourceCommit      string
+	AssignmentDigest  string
+	ExpiresAt         time.Time
+}
+
+func (s *ManagedAssignmentSource) SetActiveAssignment(version int64, digest string) {
+	s.ActiveAssignmentVersion = version
+	s.ActiveAssignmentDigest = digest
+}
+
+func (s *ManagedAssignmentSource) AssignmentActivation() (ManagedAssignmentActivation, bool) {
+	if s.assignment.AssignmentID == "" || s.assignmentDigest == "" {
+		return ManagedAssignmentActivation{}, false
+	}
+	return ManagedAssignmentActivation{
+		KLIQID:            s.assignment.KLIQID,
+		AssignmentID:      s.assignment.AssignmentID,
+		AssignmentVersion: s.assignment.AssignmentVersion,
+		SourceCommit:      s.assignment.SourceCommit,
+		AssignmentDigest:  s.assignmentDigest,
+		ExpiresAt:         s.assignment.ExpiresAt,
+	}, true
+}
+
+func (s *ManagedAssignmentSource) Load(ctx context.Context) ([]byte, string, error) {
 	if strings.TrimSpace(s.BaseURL) == "" {
 		return nil, "", fmt.Errorf("managed assignment source requires base url")
 	}
@@ -68,6 +101,8 @@ func (s ManagedAssignmentSource) Load(ctx context.Context) ([]byte, string, erro
 	if err != nil {
 		return nil, "", err
 	}
+	s.assignment = assignment
+	s.assignmentDigest = envelope.PayloadSHA256
 	artifact, ok := domain.RuntimeBundleArtifact(assignment)
 	if !ok {
 		return nil, "", fmt.Errorf("assignment %q does not include runtime_bundle artifact", assignment.AssignmentID)
@@ -75,7 +110,7 @@ func (s ManagedAssignmentSource) Load(ctx context.Context) ([]byte, string, erro
 	return append([]byte(nil), artifact.Envelope...), url + "#" + assignment.AssignmentID, nil
 }
 
-func (s ManagedAssignmentSource) verifyAssignment(ctx context.Context, envelope signing.SignedEnvelope) (domain.KLIQAssignment, error) {
+func (s *ManagedAssignmentSource) verifyAssignment(ctx context.Context, envelope signing.SignedEnvelope) (domain.KLIQAssignment, error) {
 	result, err := s.Verifier.Verify(ctx, envelope)
 	if err != nil {
 		return domain.KLIQAssignment{}, err
@@ -101,7 +136,10 @@ func (s ManagedAssignmentSource) verifyAssignment(ctx context.Context, envelope 
 		Stage:                   s.Stage,
 		Scope:                   s.Scope,
 		TrustKeyID:              s.TrustKeyID,
+		AssignmentDigest:        result.PayloadSHA256,
+		Now:                     result.VerifiedAt,
 		ActiveAssignmentVersion: s.ActiveAssignmentVersion,
+		ActiveAssignmentDigest:  s.ActiveAssignmentDigest,
 	}); err != nil {
 		return domain.KLIQAssignment{}, err
 	}

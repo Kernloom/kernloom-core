@@ -34,7 +34,7 @@ Slice 2 adds an authenticated Forge API and an async simulation job shell. Start
 podman compose -f docker-compose.dev.yml up -d redis
 make build
 
-./bin/forge api --addr :8080 --queue redis --redis-addr 127.0.0.1:6379
+./bin/forge api --addr :8080 --queue redis --redis-addr 127.0.0.1:6379 --dev-tokens
 ```
 
 Dev bearer tokens use this local format:
@@ -56,7 +56,7 @@ curl -sS -H "Authorization: Bearer ${TOKEN}" \
 ./bin/forge-worker run-once --queue redis --redis-addr 127.0.0.1:6379
 ```
 
-The API also accepts signed JWTs with OIDC/OAuth2-style claims when started with `--oidc-hmac-secret`; the dev token provider can be disabled with `--dev-tokens=false`.
+The API also accepts signed JWTs with OIDC/OAuth2-style claims when started with `--oidc-hmac-secret`; the local dev token provider is opt-in with `--dev-tokens`.
 
 ## Managed KLIQ Assignments
 

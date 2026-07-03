@@ -122,8 +122,10 @@ type KLIQAssignmentActivationContext struct {
 	Stage                   string
 	Scope                   string
 	TrustKeyID              string
+	AssignmentDigest        string
 	Now                     time.Time
 	ActiveAssignmentVersion int64
+	ActiveAssignmentDigest  string
 }
 
 func ValidateKLIQAssignmentActivation(assignment KLIQAssignment, ctx KLIQAssignmentActivationContext) error {
@@ -168,6 +170,12 @@ func ValidateKLIQAssignmentActivation(assignment KLIQAssignment, ctx KLIQAssignm
 		return fmt.Errorf("kliq assignment %q is expired", assignment.AssignmentID)
 	}
 	if assignment.AssignmentVersion > ctx.ActiveAssignmentVersion {
+		return nil
+	}
+	if assignment.AssignmentVersion == ctx.ActiveAssignmentVersion &&
+		ctx.ActiveAssignmentVersion > 0 &&
+		ctx.AssignmentDigest != "" &&
+		ctx.AssignmentDigest == ctx.ActiveAssignmentDigest {
 		return nil
 	}
 	if assignment.AssignmentVersion < ctx.ActiveAssignmentVersion && assignment.ApprovedRollback && assignment.SignatureValid {

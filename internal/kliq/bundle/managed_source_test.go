@@ -33,19 +33,26 @@ func TestManagedAssignmentSourceLoadsVerifiedRuntimeBundleArtifact(t *testing.T)
 	}))
 	defer server.Close()
 
-	data, sourceRef, err := (ManagedAssignmentSource{
-		BaseURL:                 server.URL,
-		BearerToken:             "test-token",
-		KLIQID:                  assignment.KLIQID,
-		Environment:             assignment.Environment,
-		Stage:                   assignment.Stage,
-		Scope:                   assignment.Scope,
-		TrustKeyID:              assignment.TrustKeyID,
-		ActiveAssignmentVersion: 0,
-		Verifier:                signer,
-	}).Load(context.Background())
+	source := &ManagedAssignmentSource{
+		BaseURL:     server.URL,
+		BearerToken: "test-token",
+		KLIQID:      assignment.KLIQID,
+		Environment: assignment.Environment,
+		Stage:       assignment.Stage,
+		Scope:       assignment.Scope,
+		TrustKeyID:  assignment.TrustKeyID,
+		Verifier:    signer,
+	}
+	data, sourceRef, err := source.Load(context.Background())
 	if err != nil {
 		t.Fatal(err)
+	}
+	activation, ok := source.AssignmentActivation()
+	if !ok {
+		t.Fatal("expected assignment activation metadata")
+	}
+	if activation.AssignmentDigest != envelope.PayloadSHA256 {
+		t.Fatalf("expected assignment digest %q, got %q", envelope.PayloadSHA256, activation.AssignmentDigest)
 	}
 	if string(data) != string(runtimeEnvelope) {
 		t.Fatalf("expected runtime bundle envelope, got %s", string(data))
@@ -55,12 +62,44 @@ func TestManagedAssignmentSourceLoadsVerifiedRuntimeBundleArtifact(t *testing.T)
 	}
 }
 
+func TestManagedAssignmentSourceAllowsSameVersionSameDigest(t *testing.T) {
+	now := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+	signer, err := signing.NewDevLocalSigner("forge-management-dev-local")
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer.Now = func() time.Time { return now }
+	runtimeEnvelope := json.RawMessage(`{"kind":"SignedEnvelope","payload":"runtime"}`)
+	assignment := managedSourceTestAssignment(now, runtimeEnvelope)
+	envelope := signedAssignmentEnvelope(t, signer, assignment, now.Add(time.Hour))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(envelope)
+	}))
+	defer server.Close()
+
+	_, _, err = (&ManagedAssignmentSource{
+		BaseURL:                 server.URL,
+		KLIQID:                  assignment.KLIQID,
+		Environment:             assignment.Environment,
+		Stage:                   assignment.Stage,
+		Scope:                   assignment.Scope,
+		TrustKeyID:              assignment.TrustKeyID,
+		ActiveAssignmentVersion: assignment.AssignmentVersion,
+		ActiveAssignmentDigest:  envelope.PayloadSHA256,
+		Verifier:                signer,
+	}).Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestManagedAssignmentSourceRejectsRollbackWithoutApproval(t *testing.T) {
 	now := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
 	signer, err := signing.NewDevLocalSigner("forge-management-dev-local")
 	if err != nil {
 		t.Fatal(err)
 	}
+	signer.Now = func() time.Time { return now }
 	assignment := managedSourceTestAssignment(now, json.RawMessage(`{"kind":"SignedEnvelope"}`))
 	envelope := signedAssignmentEnvelope(t, signer, assignment, now.Add(time.Hour))
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -68,7 +107,7 @@ func TestManagedAssignmentSourceRejectsRollbackWithoutApproval(t *testing.T) {
 	}))
 	defer server.Close()
 
-	_, _, err = (ManagedAssignmentSource{
+	_, _, err = (&ManagedAssignmentSource{
 		BaseURL:                 server.URL,
 		KLIQID:                  assignment.KLIQID,
 		Environment:             assignment.Environment,
@@ -80,6 +119,36 @@ func TestManagedAssignmentSourceRejectsRollbackWithoutApproval(t *testing.T) {
 	}).Load(context.Background())
 	if err == nil {
 		t.Fatal("expected rollback assignment to be rejected")
+	}
+}
+
+func TestManagedAssignmentSourceAcceptsSignedApprovedRollback(t *testing.T) {
+	now := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+	signer, err := signing.NewDevLocalSigner("forge-management-dev-local")
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer.Now = func() time.Time { return now }
+	assignment := managedSourceTestAssignment(now, json.RawMessage(`{"kind":"SignedEnvelope"}`))
+	assignment.ApprovedRollback = true
+	envelope := signedAssignmentEnvelope(t, signer, assignment, now.Add(time.Hour))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(envelope)
+	}))
+	defer server.Close()
+
+	_, _, err = (&ManagedAssignmentSource{
+		BaseURL:                 server.URL,
+		KLIQID:                  assignment.KLIQID,
+		Environment:             assignment.Environment,
+		Stage:                   assignment.Stage,
+		Scope:                   assignment.Scope,
+		TrustKeyID:              assignment.TrustKeyID,
+		ActiveAssignmentVersion: 2,
+		Verifier:                signer,
+	}).Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
 	}
 }
 

@@ -158,7 +158,6 @@ func loadManagedBundle(args []string) {
 	stage := fs.String("stage", "", "local KLIQ stage")
 	scope := fs.String("scope", "", "local KLIQ scope")
 	trustKeyID := fs.String("trust-key-id", "", "trusted assignment signing key id")
-	activeVersion := fs.Int64("active-assignment-version", 0, "currently active assignment version")
 	keyPath := fs.String("key", "", "path to dev-local Ed25519 verifier key file")
 	statePath := fs.String("state", defaultStatePath, "path to KLIQ local SQLite state")
 	if err := fs.Parse(args); err != nil {
@@ -171,16 +170,15 @@ func loadManagedBundle(args []string) {
 	}
 	manager, closeStore := managerOrExit(*statePath, *keyPath, nil)
 	defer closeStore()
-	record, err := manager.LoadBundle(context.Background(), kliqbundle.ManagedAssignmentSource{
-		BaseURL:                 *assignmentURL,
-		BearerToken:             *bearerToken,
-		KLIQID:                  *kliqID,
-		Environment:             *environment,
-		Stage:                   *stage,
-		Scope:                   *scope,
-		TrustKeyID:              *trustKeyID,
-		ActiveAssignmentVersion: *activeVersion,
-		Verifier:                manager.Verifier,
+	record, err := manager.LoadManagedBundle(context.Background(), &kliqbundle.ManagedAssignmentSource{
+		BaseURL:     *assignmentURL,
+		BearerToken: *bearerToken,
+		KLIQID:      *kliqID,
+		Environment: *environment,
+		Stage:       *stage,
+		Scope:       *scope,
+		TrustKeyID:  *trustKeyID,
+		Verifier:    manager.Verifier,
 	})
 	if err != nil {
 		logError("kliq_load_managed_bundle_failed", "kliq_id", *kliqID, "environment", *environment, "stage", *stage, "error", err.Error())

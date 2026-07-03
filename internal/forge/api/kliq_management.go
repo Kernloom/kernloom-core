@@ -157,13 +157,23 @@ func (s Server) createKLIQAssignment(w http.ResponseWriter, r *http.Request, pri
 		writeError(w, http.StatusBadRequest, "invalid_json")
 		return
 	}
+	registration, err := s.Management.Registration(r.Context(), strings.TrimSpace(assignment.KLIQID))
+	if errors.Is(err, management.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "kliq_registration_not_found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "registration_read_failed")
+		return
+	}
+	if err := validateKLIQScope(registration, assignment.Environment, assignment.Stage, assignment.Scope); err != nil {
+		writeError(w, http.StatusBadRequest, "assignment_scope_mismatch")
+		return
+	}
 	if err := s.Authorizer.Authorize(principal, authz.Request{
 		Action:       "kliq.assignment.create",
 		AllowedRoles: authz.KLIQManageRoles(),
-		Scope: authn.Scope{
-			Environment: assignment.Environment,
-			Stage:       assignment.Stage,
-		},
+		Scope:        kliqRegistrationScope(registration),
 	}); err != nil {
 		writeError(w, http.StatusForbidden, "forbidden")
 		return
@@ -215,14 +225,25 @@ func (s Server) latestKLIQAssignment(w http.ResponseWriter, r *http.Request, pri
 		writeError(w, http.StatusInternalServerError, "kliq_management_store_not_configured")
 		return
 	}
+	kliqID := strings.TrimSpace(r.PathValue("kliq_id"))
+	registration, err := s.Management.Registration(r.Context(), kliqID)
+	if errors.Is(err, management.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "kliq_registration_not_found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "registration_read_failed")
+		return
+	}
 	if err := s.Authorizer.Authorize(principal, authz.Request{
 		Action:       "kliq.assignment.read",
 		AllowedRoles: authz.KLIQReadRoles(),
+		Scope:        kliqRegistrationScope(registration),
 	}); err != nil {
 		writeError(w, http.StatusForbidden, "forbidden")
 		return
 	}
-	envelope, err := s.Management.LatestAssignment(r.Context(), strings.TrimSpace(r.PathValue("kliq_id")))
+	envelope, err := s.Management.LatestAssignment(r.Context(), kliqID)
 	if errors.Is(err, management.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "assignment_not_found")
 		return
@@ -244,13 +265,23 @@ func (s Server) recordKLIQHeartbeat(w http.ResponseWriter, r *http.Request, prin
 		writeError(w, http.StatusBadRequest, "invalid_json")
 		return
 	}
+	registration, err := s.Management.Registration(r.Context(), strings.TrimSpace(heartbeat.KLIQID))
+	if errors.Is(err, management.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "kliq_registration_not_found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "registration_read_failed")
+		return
+	}
+	if err := validateKLIQScope(registration, heartbeat.Environment, heartbeat.Stage, heartbeat.Scope); err != nil {
+		writeError(w, http.StatusBadRequest, "heartbeat_scope_mismatch")
+		return
+	}
 	if err := s.Authorizer.Authorize(principal, authz.Request{
 		Action:       "kliq.heartbeat.write",
 		AllowedRoles: authz.KLIQManageRoles(),
-		Scope: authn.Scope{
-			Environment: heartbeat.Environment,
-			Stage:       heartbeat.Stage,
-		},
+		Scope:        kliqRegistrationScope(registration),
 	}); err != nil {
 		writeError(w, http.StatusForbidden, "forbidden")
 		return
@@ -275,13 +306,23 @@ func (s Server) recordKLIQStatusReport(w http.ResponseWriter, r *http.Request, p
 		writeError(w, http.StatusBadRequest, "invalid_json")
 		return
 	}
+	registration, err := s.Management.Registration(r.Context(), strings.TrimSpace(report.KLIQID))
+	if errors.Is(err, management.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "kliq_registration_not_found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "registration_read_failed")
+		return
+	}
+	if err := validateKLIQScope(registration, report.Environment, report.Stage, report.Scope); err != nil {
+		writeError(w, http.StatusBadRequest, "status_report_scope_mismatch")
+		return
+	}
 	if err := s.Authorizer.Authorize(principal, authz.Request{
 		Action:       "kliq.status_report.write",
 		AllowedRoles: authz.KLIQManageRoles(),
-		Scope: authn.Scope{
-			Environment: report.Environment,
-			Stage:       report.Stage,
-		},
+		Scope:        kliqRegistrationScope(registration),
 	}); err != nil {
 		writeError(w, http.StatusForbidden, "forbidden")
 		return
@@ -301,14 +342,25 @@ func (s Server) getKLIQStatusReport(w http.ResponseWriter, r *http.Request, prin
 		writeError(w, http.StatusInternalServerError, "kliq_management_store_not_configured")
 		return
 	}
+	kliqID := strings.TrimSpace(r.PathValue("kliq_id"))
+	registration, err := s.Management.Registration(r.Context(), kliqID)
+	if errors.Is(err, management.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "kliq_registration_not_found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "registration_read_failed")
+		return
+	}
 	if err := s.Authorizer.Authorize(principal, authz.Request{
 		Action:       "kliq.status_report.read",
 		AllowedRoles: authz.KLIQReadRoles(),
+		Scope:        kliqRegistrationScope(registration),
 	}); err != nil {
 		writeError(w, http.StatusForbidden, "forbidden")
 		return
 	}
-	report, err := s.Management.StatusReport(r.Context(), strings.TrimSpace(r.PathValue("kliq_id")))
+	report, err := s.Management.StatusReport(r.Context(), kliqID)
 	if errors.Is(err, management.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "status_report_not_found")
 		return
@@ -342,6 +394,26 @@ func validateAssignmentRequest(assignment domain.KLIQAssignment) error {
 		return errors.New("expires_at is required")
 	case len(assignment.Artifacts) == 0:
 		return errors.New("at least one artifact is required")
+	}
+	return nil
+}
+
+func kliqRegistrationScope(registration domain.KLIQRegistration) authn.Scope {
+	return authn.Scope{
+		Environment: registration.Environment,
+		Stage:       registration.Stage,
+	}
+}
+
+func validateKLIQScope(registration domain.KLIQRegistration, environment, stage, scope string) error {
+	if registration.Environment != environment {
+		return errors.New("environment mismatch")
+	}
+	if registration.Stage != stage {
+		return errors.New("stage mismatch")
+	}
+	if registration.Scope != scope {
+		return errors.New("scope mismatch")
 	}
 	return nil
 }

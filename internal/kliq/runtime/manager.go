@@ -80,6 +80,54 @@ func (m Manager) LoadBundle(ctx context.Context, source kliqbundle.Source) (acti
 	if m.Verifier == nil {
 		return actionstate.BundleRecord{}, fmt.Errorf("kliq runtime manager requires bundle verifier")
 	}
+	return m.loadBundle(ctx, source)
+}
+
+func (m Manager) LoadManagedBundle(ctx context.Context, source *kliqbundle.ManagedAssignmentSource) (actionstate.BundleRecord, error) {
+	if m.Store == nil {
+		return actionstate.BundleRecord{}, fmt.Errorf("kliq runtime manager requires state store")
+	}
+	if m.Verifier == nil {
+		return actionstate.BundleRecord{}, fmt.Errorf("kliq runtime manager requires bundle verifier")
+	}
+	if source == nil {
+		return actionstate.BundleRecord{}, fmt.Errorf("managed assignment source is required")
+	}
+	if source.Verifier == nil {
+		source.Verifier = m.Verifier
+	}
+	if source.KLIQID != "" {
+		state, err := m.Store.KLIQManagementState(ctx, source.KLIQID)
+		if err != nil && !errors.Is(err, actionstate.ErrNotFound) {
+			return actionstate.BundleRecord{}, err
+		}
+		if err == nil {
+			source.SetActiveAssignment(state.ActiveAssignmentVersion, state.ActiveAssignmentDigest)
+		}
+	}
+	record, err := m.loadBundle(ctx, source)
+	if err != nil {
+		return actionstate.BundleRecord{}, err
+	}
+	activation, ok := source.AssignmentActivation()
+	if !ok {
+		return actionstate.BundleRecord{}, fmt.Errorf("managed assignment source did not expose activated assignment state")
+	}
+	if err := m.Store.SaveKLIQManagementState(ctx, actionstate.KLIQManagementState{
+		KLIQID:                       activation.KLIQID,
+		ActiveAssignmentID:           activation.AssignmentID,
+		ActiveAssignmentVersion:      activation.AssignmentVersion,
+		ActiveAssignmentSourceCommit: activation.SourceCommit,
+		ActiveAssignmentDigest:       activation.AssignmentDigest,
+		ActiveAssignmentExpiresAt:    activation.ExpiresAt,
+		ActiveAssignmentActivatedAt:  m.now(),
+	}); err != nil {
+		return actionstate.BundleRecord{}, err
+	}
+	return record, nil
+}
+
+func (m Manager) loadBundle(ctx context.Context, source kliqbundle.Source) (actionstate.BundleRecord, error) {
 	data, sourceRef, err := source.Load(ctx)
 	if err != nil {
 		return actionstate.BundleRecord{}, err

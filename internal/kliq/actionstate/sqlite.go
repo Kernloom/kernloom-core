@@ -93,6 +93,15 @@ func (s *SQLiteStore) migrate(ctx context.Context) error {
 		`ALTER TABLE runtime_action_leases ADD COLUMN mode TEXT NOT NULL DEFAULT 'required'`,
 		`ALTER TABLE runtime_action_leases ADD COLUMN required INTEGER NOT NULL DEFAULT 1`,
 		`ALTER TABLE bundle_cache ADD COLUMN correlation_id TEXT NOT NULL DEFAULT ''`,
+		`CREATE TABLE IF NOT EXISTS kliq_management_state (
+			kliq_id TEXT PRIMARY KEY,
+			active_assignment_id TEXT NOT NULL,
+			active_assignment_version INTEGER NOT NULL,
+			active_assignment_source_commit TEXT NOT NULL,
+			active_assignment_digest TEXT NOT NULL,
+			active_assignment_expires_at TEXT NOT NULL,
+			active_assignment_activated_at TEXT NOT NULL
+		)`,
 		`DROP INDEX IF EXISTS runtime_action_leases_dedup`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS runtime_action_leases_dedup
 			ON runtime_action_leases(adapter_id, capability_id, action_type, target_scope, target_key)
@@ -173,6 +182,83 @@ func (s *SQLiteStore) LastBundle(ctx context.Context) (BundleRecord, error) {
 		return BundleRecord{}, err
 	}
 	return record, nil
+}
+
+func (s *SQLiteStore) SaveKLIQManagementState(ctx context.Context, state KLIQManagementState) error {
+	if state.KLIQID == "" {
+		return fmt.Errorf("kliq management state requires kliq_id")
+	}
+	if state.ActiveAssignmentID == "" {
+		return fmt.Errorf("kliq management state requires active_assignment_id")
+	}
+	if state.ActiveAssignmentVersion <= 0 {
+		return fmt.Errorf("kliq management state requires positive active_assignment_version")
+	}
+	if state.ActiveAssignmentSourceCommit == "" {
+		return fmt.Errorf("kliq management state requires active_assignment_source_commit")
+	}
+	if state.ActiveAssignmentDigest == "" {
+		return fmt.Errorf("kliq management state requires active_assignment_digest")
+	}
+	if state.ActiveAssignmentExpiresAt.IsZero() {
+		return fmt.Errorf("kliq management state requires active_assignment_expires_at")
+	}
+	if state.ActiveAssignmentActivatedAt.IsZero() {
+		return fmt.Errorf("kliq management state requires active_assignment_activated_at")
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO kliq_management_state (
+		kliq_id, active_assignment_id, active_assignment_version, active_assignment_source_commit,
+		active_assignment_digest, active_assignment_expires_at, active_assignment_activated_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?)
+	ON CONFLICT(kliq_id) DO UPDATE SET
+		active_assignment_id = excluded.active_assignment_id,
+		active_assignment_version = excluded.active_assignment_version,
+		active_assignment_source_commit = excluded.active_assignment_source_commit,
+		active_assignment_digest = excluded.active_assignment_digest,
+		active_assignment_expires_at = excluded.active_assignment_expires_at,
+		active_assignment_activated_at = excluded.active_assignment_activated_at`,
+		state.KLIQID,
+		state.ActiveAssignmentID,
+		state.ActiveAssignmentVersion,
+		state.ActiveAssignmentSourceCommit,
+		state.ActiveAssignmentDigest,
+		formatTime(state.ActiveAssignmentExpiresAt),
+		formatTime(state.ActiveAssignmentActivatedAt),
+	)
+	return err
+}
+
+func (s *SQLiteStore) KLIQManagementState(ctx context.Context, kliqID string) (KLIQManagementState, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT
+		kliq_id, active_assignment_id, active_assignment_version, active_assignment_source_commit,
+		active_assignment_digest, active_assignment_expires_at, active_assignment_activated_at
+		FROM kliq_management_state WHERE kliq_id = ?`, kliqID)
+	var state KLIQManagementState
+	var expiresAt, activatedAt string
+	if err := row.Scan(
+		&state.KLIQID,
+		&state.ActiveAssignmentID,
+		&state.ActiveAssignmentVersion,
+		&state.ActiveAssignmentSourceCommit,
+		&state.ActiveAssignmentDigest,
+		&expiresAt,
+		&activatedAt,
+	); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return KLIQManagementState{}, ErrNotFound
+		}
+		return KLIQManagementState{}, err
+	}
+	var err error
+	state.ActiveAssignmentExpiresAt, err = parseTime(expiresAt)
+	if err != nil {
+		return KLIQManagementState{}, err
+	}
+	state.ActiveAssignmentActivatedAt, err = parseTime(activatedAt)
+	if err != nil {
+		return KLIQManagementState{}, err
+	}
+	return state, nil
 }
 
 func (s *SQLiteStore) UpsertLease(ctx context.Context, lease RuntimeActionLease) error {

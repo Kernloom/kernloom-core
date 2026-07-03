@@ -6,6 +6,9 @@ package runtime
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -40,6 +43,66 @@ func TestManagerLoadBundleRejectsUnsignedRuntimeBundle(t *testing.T) {
 	_, err := (Manager{Store: store, Verifier: signer, Now: func() time.Time { return now }}).LoadBundle(ctx, kliqbundle.LocalFileSource{Path: path})
 	if err == nil {
 		t.Fatal("expected unsigned runtime bundle to be rejected")
+	}
+}
+
+func TestManagerLoadManagedBundlePersistsAssignmentVersionAndRejectsOlderAfterRestart(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+	statePath := filepath.Join(t.TempDir(), "state.db")
+	store, err := actionstate.OpenSQLite(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer := testSigner(t, now)
+	runtimeEnvelope := signedBundleData(t, signer, now, now.Add(time.Hour))
+	currentAssignment := signedManagedAssignment(t, signer, managedTestAssignment(now, signer.KeyID, 2, runtimeEnvelope), now.Add(time.Hour))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(currentAssignment)
+	}))
+	defer server.Close()
+
+	manager := testManager(store, signer, now)
+	_, err = manager.LoadManagedBundle(ctx, &kliqbundle.ManagedAssignmentSource{
+		BaseURL:     server.URL,
+		KLIQID:      "kliq.test",
+		Environment: "prod",
+		Stage:       "prod",
+		Scope:       "edge-prod",
+		TrustKeyID:  signer.KeyID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := store.KLIQManagementState(ctx, "kliq.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.ActiveAssignmentVersion != 2 || state.ActiveAssignmentDigest != currentAssignment.PayloadSHA256 {
+		t.Fatalf("expected active assignment v2 to persist, got %#v", state)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	restartedStore, err := actionstate.OpenSQLite(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restartedStore.Close()
+	olderAssignment := signedManagedAssignment(t, signer, managedTestAssignment(now, signer.KeyID, 1, runtimeEnvelope), now.Add(time.Hour))
+	currentAssignment = olderAssignment
+	restarted := testManager(restartedStore, signer, now)
+	_, err = restarted.LoadManagedBundle(ctx, &kliqbundle.ManagedAssignmentSource{
+		BaseURL:     server.URL,
+		KLIQID:      "kliq.test",
+		Environment: "prod",
+		Stage:       "prod",
+		Scope:       "edge-prod",
+		TrustKeyID:  signer.KeyID,
+	})
+	if err == nil {
+		t.Fatal("expected older managed assignment to be rejected after restart")
 	}
 }
 
@@ -511,6 +574,26 @@ func testSigner(t *testing.T, now time.Time) *signing.DevLocalSigner {
 
 func signedBundleFile(t *testing.T, signer *signing.DevLocalSigner, signedAt, expiresAt time.Time) string {
 	t.Helper()
+	path := filepath.Join(t.TempDir(), "runtime_bundle.signed.json")
+	data := signedBundleData(t, signer, signedAt, expiresAt)
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func signedBundleData(t *testing.T, signer *signing.DevLocalSigner, signedAt, expiresAt time.Time) []byte {
+	t.Helper()
+	envelope := signedBundleEnvelope(t, signer, signedAt, expiresAt)
+	data, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
+func signedBundleEnvelope(t *testing.T, signer *signing.DevLocalSigner, signedAt, expiresAt time.Time) signing.SignedEnvelope {
+	t.Helper()
 	signer.Now = func() time.Time { return signedAt }
 	payload, err := json.Marshal(testRuntimeBundle())
 	if err != nil {
@@ -524,9 +607,44 @@ func signedBundleFile(t *testing.T, signer *signing.DevLocalSigner, signedAt, ex
 	if err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(t.TempDir(), "runtime_bundle.signed.json")
-	writeJSON(t, path, envelope)
-	return path
+	return envelope
+}
+
+func managedTestAssignment(now time.Time, trustKeyID string, version int64, runtimeEnvelope []byte) domain.KLIQAssignment {
+	return domain.KLIQAssignment{
+		AssignmentID:      "kliq_assignment.test.v" + fmt.Sprint(version),
+		AssignmentVersion: version,
+		KLIQID:            "kliq.test",
+		Environment:       "prod",
+		Stage:             "prod",
+		Scope:             "edge-prod",
+		SourceCommit:      "abc123",
+		TrustKeyID:        trustKeyID,
+		CreatedAt:         now,
+		ExpiresAt:         now.Add(time.Hour),
+		Artifacts: []domain.KLIQAssignedArtifact{{
+			ArtifactType: "runtime_bundle",
+			ArtifactID:   "runtime_bundle.test",
+			SHA256:       domain.SHA256JSON(runtimeEnvelope),
+			Envelope:     append([]byte(nil), runtimeEnvelope...),
+		}},
+	}
+}
+
+func signedManagedAssignment(t *testing.T, signer *signing.DevLocalSigner, assignment domain.KLIQAssignment, expiresAt time.Time) signing.SignedEnvelope {
+	t.Helper()
+	payload, err := json.Marshal(assignment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope, err := signer.Sign(context.Background(), payload, signing.Metadata{
+		SourceCommit: assignment.SourceCommit,
+		ExpiresAt:    &expiresAt,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return envelope
 }
 
 func testRuntimeBundle() corebundle.RuntimeBundle {

@@ -26,6 +26,16 @@ type BundleRecord struct {
 	VerifiedAt    time.Time
 }
 
+type KLIQManagementState struct {
+	KLIQID                       string
+	ActiveAssignmentID           string
+	ActiveAssignmentVersion      int64
+	ActiveAssignmentSourceCommit string
+	ActiveAssignmentDigest       string
+	ActiveAssignmentExpiresAt    time.Time
+	ActiveAssignmentActivatedAt  time.Time
+}
+
 type RuntimeActionLease struct {
 	RuntimeActionID   string
 	PlanID            string
@@ -142,6 +152,8 @@ type AuditRecord struct {
 type Store interface {
 	SaveBundle(ctx context.Context, record BundleRecord) error
 	LastBundle(ctx context.Context) (BundleRecord, error)
+	SaveKLIQManagementState(ctx context.Context, state KLIQManagementState) error
+	KLIQManagementState(ctx context.Context, kliqID string) (KLIQManagementState, error)
 	UpsertLease(ctx context.Context, lease RuntimeActionLease) error
 	LeaseByDedupKey(ctx context.Context, adapterID, capabilityID, actionType, targetScope, targetKey string) (RuntimeActionLease, error)
 	LeaseByID(ctx context.Context, runtimeActionID string) (RuntimeActionLease, error)
