@@ -33,6 +33,7 @@ const (
 	RuntimeActionActive       RuntimeActionStatus = "active"
 	RuntimeActionExpiring     RuntimeActionStatus = "expiring"
 	RuntimeActionExpired      RuntimeActionStatus = "expired"
+	RuntimeActionNotFound     RuntimeActionStatus = "not_found"
 	RuntimeActionFailed       RuntimeActionStatus = "failed"
 	RuntimeActionUnknown      RuntimeActionStatus = "unknown"
 	RuntimeActionCompensating RuntimeActionStatus = "compensating"

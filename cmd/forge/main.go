@@ -48,6 +48,7 @@ func compile(args []string) {
 	fs.StringVar(&opts.SigningMode, "signing", compiler.SigningModeDevLocal, "artifact signing mode: dev-local or none")
 	fs.StringVar(&opts.SigningKeyPath, "signing-key", "", "dev-local signing key path; defaults to output dir keys/dev-local.ed25519.json")
 	fs.StringVar(&opts.SigningKeyID, "signing-key-id", "dev-local", "key id to place in signed envelopes")
+	fs.StringVar(&opts.CorrelationID, "correlation-id", "", "correlation id to embed in build manifest and artifacts; defaults to a deterministic local-dev id")
 	fs.DurationVar(&opts.SignatureTTL, "signature-ttl", 24*time.Hour, "signed artifact validity duration")
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintln(os.Stderr, err)

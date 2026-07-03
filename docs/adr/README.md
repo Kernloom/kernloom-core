@@ -22,4 +22,4 @@ These ADRs are fixed implementation-start decisions from the Kernloom v1 build c
 | ADR-016 | Issuance PDP is a gate; Issuer/Signer creates proof artifacts. |
 | ADR-017 | Kernloom is attestation-ready but does not hard-code Keylime. |
 | ADR-018 | Detailed admin docs are gitignored; admin templates are versioned. |
-
+| ADR-019 | KLIQ uses RuntimeActionPlans and adapter-aware leases for multi-adapter runtime execution. |

@@ -143,6 +143,10 @@ func compileOne(ctx context.Context, card *intent.Card, catalog *registry.Catalo
 	riskRecipe, _ := catalog.RiskRecipe(card.RiskRecipe)
 	sourceCommit := gitCommit(opts.PolicyRepo)
 	policyFileHash := fileSHA256(card.SourcePath)
+	correlationID := strings.TrimSpace(opts.CorrelationID)
+	if correlationID == "" {
+		correlationID = "correlation." + strings.TrimPrefix(sha256String(card.ID+"\x00"+sourceCommit+"\x00"+policyFileHash), "sha256:")[:16]
+	}
 	coreRegistryDigest := pathSHA256(opts.CoreRegistry)
 	enterpriseRegistryDigest := pathSHA256(opts.EnterpriseRegistry)
 	compilerSourceCommit := gitCommit(".")
@@ -215,11 +219,12 @@ func compileOne(ctx context.Context, card *intent.Card, catalog *registry.Catalo
 	}
 
 	artifactMetadata := artifact.Metadata{
-		PolicyID:     card.ID,
-		KNI:          card.Version,
-		SourcePath:   relativeOrSame(opts.PolicyRepo, card.SourcePath),
-		SourceCommit: sourceCommit,
-		CreatedAt:    time.Now().UTC(),
+		PolicyID:      card.ID,
+		KNI:           card.Version,
+		SourcePath:    relativeOrSame(opts.PolicyRepo, card.SourcePath),
+		SourceCommit:  sourceCommit,
+		CorrelationID: correlationID,
+		CreatedAt:     time.Now().UTC(),
 		Digests: map[string]string{
 			"policy_file":         policyFileHash,
 			"core_registry":       coreRegistryDigest,
@@ -295,7 +300,7 @@ func compileOne(ctx context.Context, card *intent.Card, catalog *registry.Catalo
 
 	manifest := PolicyBuildManifest{
 		Kind:     "PolicyBuildManifest",
-		Metadata: ManifestMetadata{ID: "build." + card.ID},
+		Metadata: ManifestMetadata{ID: "build." + card.ID, CorrelationID: correlationID},
 		Spec: ManifestSpec{
 			KNI:      KNIRef{Version: card.Version},
 			Protocol: ProtocolRef{Version: "adapter/v1"},
@@ -554,7 +559,7 @@ func runtimeBundleArtifact(card *intent.Card, resolved ResolvedPolicy, metadata 
 			MaxScope:       resolved.Spec.Runtime.MaxScope.Label,
 			MaxScopeSource: resolved.Spec.Runtime.MaxScopeSource,
 		},
-		Status: artifact.PlannedStatus("Runtime execution is not implemented in Slice 2."),
+		Status: artifact.PlannedStatus("Runtime bundle is planned and locally verifiable. Real adapter execution is not implemented yet."),
 	}
 }
 
@@ -583,7 +588,7 @@ func contextRoutePackArtifact(card *intent.Card, resolved ResolvedPolicy, metada
 			Stage:    resolved.Spec.Stage,
 			Routes:   routes,
 		},
-		Status: artifact.PlannedStatus("Context projection routing is planned only in Slice 2."),
+		Status: artifact.PlannedStatus("Context projection routing is planned; runtime enforcement is not active yet."),
 	}
 }
 
@@ -611,7 +616,7 @@ func conformanceExpectationArtifact(card *intent.Card, resolved ResolvedPolicy, 
 			Expectations: expectations,
 			Prohibit:     prohibit,
 		},
-		Status: artifact.PlannedStatus("Conformance checking is not implemented in Slice 2."),
+		Status: artifact.PlannedStatus("Conformance expectation is planned; evaluator is not implemented yet."),
 	}
 }
 

@@ -25,6 +25,7 @@ type Options struct {
 	SigningMode              string
 	SigningKeyPath           string
 	SigningKeyID             string
+	CorrelationID            string
 	SignatureTTL             time.Duration
 	Signer                   signing.Signer
 	Now                      func() time.Time
@@ -138,7 +139,8 @@ type PolicyBuildManifest struct {
 }
 
 type ManifestMetadata struct {
-	ID string `json:"id"`
+	ID            string `json:"id"`
+	CorrelationID string `json:"correlation_id"`
 }
 
 type ManifestSpec struct {

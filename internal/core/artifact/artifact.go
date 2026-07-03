@@ -6,14 +6,15 @@ package artifact
 import "time"
 
 type Metadata struct {
-	ID           string            `json:"id"`
-	PolicyID     string            `json:"policy_id"`
-	ArtifactType string            `json:"artifact_type"`
-	KNI          string            `json:"kni_version"`
-	SourcePath   string            `json:"source_path"`
-	SourceCommit string            `json:"source_commit"`
-	CreatedAt    time.Time         `json:"created_at"`
-	Digests      map[string]string `json:"digests,omitempty"`
+	ID            string            `json:"id"`
+	PolicyID      string            `json:"policy_id"`
+	ArtifactType  string            `json:"artifact_type"`
+	KNI           string            `json:"kni_version"`
+	SourcePath    string            `json:"source_path"`
+	SourceCommit  string            `json:"source_commit"`
+	CorrelationID string            `json:"correlation_id,omitempty"`
+	CreatedAt     time.Time         `json:"created_at"`
+	Digests       map[string]string `json:"digests,omitempty"`
 }
 
 type Ref struct {
