@@ -24,10 +24,15 @@ import (
 const AuditPendingUpload = "pending_upload"
 
 type Manager struct {
-	Store    actionstate.Store
-	Verifier signing.Verifier
-	Registry AdapterRuntimeRegistry
-	Now      func() time.Time
+	Store       actionstate.Store
+	Verifier    signing.Verifier
+	TrustBundle domain.TrustBundle
+	Registry    AdapterRuntimeRegistry
+	Now         func() time.Time
+}
+
+type managedActivationStore interface {
+	SaveManagedBundleActivation(ctx context.Context, record actionstate.BundleRecord, state actionstate.KLIQManagementState, artifacts []actionstate.AssignmentArtifactRecord) error
 }
 
 type ExecuteRequest struct {
@@ -105,7 +110,7 @@ func (m Manager) LoadManagedBundle(ctx context.Context, source *kliqbundle.Manag
 			source.SetActiveAssignment(state.ActiveAssignmentVersion, state.ActiveAssignmentDigest)
 		}
 	}
-	record, err := m.loadBundle(ctx, source)
+	record, err := m.buildBundleRecord(ctx, source)
 	if err != nil {
 		return actionstate.BundleRecord{}, err
 	}
@@ -113,7 +118,8 @@ func (m Manager) LoadManagedBundle(ctx context.Context, source *kliqbundle.Manag
 	if !ok {
 		return actionstate.BundleRecord{}, fmt.Errorf("managed assignment source did not expose activated assignment state")
 	}
-	if err := m.Store.SaveKLIQManagementState(ctx, actionstate.KLIQManagementState{
+	stagedArtifacts := assignmentArtifactRecords(activation, source.AssignmentArtifacts(), m.now())
+	state := actionstate.KLIQManagementState{
 		KLIQID:                       activation.KLIQID,
 		ActiveAssignmentID:           activation.AssignmentID,
 		ActiveAssignmentVersion:      activation.AssignmentVersion,
@@ -121,13 +127,52 @@ func (m Manager) LoadManagedBundle(ctx context.Context, source *kliqbundle.Manag
 		ActiveAssignmentDigest:       activation.AssignmentDigest,
 		ActiveAssignmentExpiresAt:    activation.ExpiresAt,
 		ActiveAssignmentActivatedAt:  m.now(),
-	}); err != nil {
+	}
+	if atomicStore, ok := m.Store.(managedActivationStore); ok {
+		if err := atomicStore.SaveManagedBundleActivation(ctx, record, state, stagedArtifacts); err != nil {
+			return actionstate.BundleRecord{}, err
+		}
+		return record, nil
+	}
+	if err := m.Store.SaveBundle(ctx, record); err != nil {
+		return actionstate.BundleRecord{}, err
+	}
+	if err := m.Store.SaveKLIQManagementState(ctx, state); err != nil {
 		return actionstate.BundleRecord{}, err
 	}
 	return record, nil
 }
 
+func assignmentArtifactRecords(activation kliqbundle.ManagedAssignmentActivation, artifacts []domain.KLIQAssignedArtifact, activatedAt time.Time) []actionstate.AssignmentArtifactRecord {
+	records := make([]actionstate.AssignmentArtifactRecord, 0, len(artifacts))
+	for _, artifact := range artifacts {
+		records = append(records, actionstate.AssignmentArtifactRecord{
+			KLIQID:            activation.KLIQID,
+			AssignmentID:      activation.AssignmentID,
+			AssignmentVersion: activation.AssignmentVersion,
+			ArtifactType:      artifact.ArtifactType,
+			ArtifactID:        artifact.ArtifactID,
+			ArtifactRef:       artifact.ArtifactRef,
+			SHA256:            artifact.SHA256,
+			EnvelopeJSON:      append([]byte(nil), artifact.Envelope...),
+			ActivatedAt:       activatedAt,
+		})
+	}
+	return records
+}
+
 func (m Manager) loadBundle(ctx context.Context, source kliqbundle.Source) (actionstate.BundleRecord, error) {
+	record, err := m.buildBundleRecord(ctx, source)
+	if err != nil {
+		return actionstate.BundleRecord{}, err
+	}
+	if err := m.Store.SaveBundle(ctx, record); err != nil {
+		return actionstate.BundleRecord{}, err
+	}
+	return record, nil
+}
+
+func (m Manager) buildBundleRecord(ctx context.Context, source kliqbundle.Source) (actionstate.BundleRecord, error) {
 	data, sourceRef, err := source.Load(ctx)
 	if err != nil {
 		return actionstate.BundleRecord{}, err
@@ -148,9 +193,6 @@ func (m Manager) loadBundle(ctx context.Context, source kliqbundle.Source) (acti
 		EnvelopeJSON:  append([]byte(nil), data...),
 		ExpiresAt:     verified.Envelope.ExpiresAt.UTC(),
 		VerifiedAt:    now,
-	}
-	if err := m.Store.SaveBundle(ctx, record); err != nil {
-		return actionstate.BundleRecord{}, err
 	}
 	return record, nil
 }
@@ -248,6 +290,9 @@ func (m Manager) planFromRequest(ctx context.Context, req ExecuteRequest) (Runti
 	if err != nil {
 		return RuntimeActionPlan{}, nil, err
 	}
+	if err := m.ensureActiveAssignmentAllowsNewActions(ctx); err != nil {
+		return RuntimeActionPlan{}, nil, err
+	}
 	runtimeBundle := verified.Bundle
 	if !runtimeBundle.Spec.RuntimeAllowed {
 		return RuntimeActionPlan{}, nil, fmt.Errorf("runtime bundle %q does not allow runtime actions", runtimeBundle.Metadata.ID)
@@ -328,6 +373,27 @@ func (m Manager) planFromRequest(ctx context.Context, req ExecuteRequest) (Runti
 		}},
 	}
 	return plan, bundleRecord.EnvelopeJSON, nil
+}
+
+func (m Manager) ensureActiveAssignmentAllowsNewActions(ctx context.Context) error {
+	credential, err := m.Store.KLIQCredential(ctx)
+	if errors.Is(err, actionstate.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	state, err := m.Store.KLIQManagementState(ctx, credential.KLIQID)
+	if errors.Is(err, actionstate.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !m.now().UTC().Before(state.ActiveAssignmentExpiresAt.UTC()) {
+		return fmt.Errorf("active assignment %q is expired; denying new runtime actions", state.ActiveAssignmentID)
+	}
+	return nil
 }
 
 func (m Manager) executePlannedAction(ctx context.Context, plan RuntimeActionPlan, action PlannedRuntimeAction, executor RuntimeExecutor, signedBundle []byte) (RuntimeActionExecutionResult, error) {
@@ -700,11 +766,20 @@ func audit(lease actionstate.RuntimeActionLease, message string, now time.Time) 
 	data, _ := json.Marshal(map[string]string{
 		"runtime_action_id": lease.RuntimeActionID,
 		"plan_id":           lease.PlanID,
+		"decision_id":       lease.DecisionID,
+		"policy_id":         lease.PolicyID,
+		"bundle_id":         lease.BundleID,
+		"source_commit":     lease.SourceCommit,
+		"correlation_id":    lease.CorrelationID,
 		"adapter_id":        lease.AdapterID,
 		"capability_id":     lease.CapabilityID,
 		"mode":              lease.Mode,
+		"action_type":       lease.ActionType,
+		"target_scope":      lease.TargetScope,
+		"audit_id":          lease.AuditID,
 		"status":            string(lease.Status),
 		"message":           message,
+		"expires_at":        lease.ExpiresAt.Format(time.RFC3339Nano),
 	})
 	return actionstate.AuditRecord{
 		ID:              "audit_spool." + shortHash(lease.RuntimeActionID+string(lease.Status)+now.Format(time.RFC3339Nano)),

@@ -81,6 +81,13 @@ func TestManagerLoadManagedBundlePersistsAssignmentVersionAndRejectsOlderAfterRe
 	if state.ActiveAssignmentVersion != 2 || state.ActiveAssignmentDigest != currentAssignment.PayloadSHA256 {
 		t.Fatalf("expected active assignment v2 to persist, got %#v", state)
 	}
+	artifacts, err := store.AssignmentArtifacts(ctx, "kliq.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(artifacts) != 1 || artifacts[0].ArtifactType != "runtime_bundle" || artifacts[0].AssignmentVersion != 2 {
+		t.Fatalf("expected staged runtime bundle artifact for active assignment, got %#v", artifacts)
+	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -104,6 +111,65 @@ func TestManagerLoadManagedBundlePersistsAssignmentVersionAndRejectsOlderAfterRe
 	if err == nil {
 		t.Fatal("expected older managed assignment to be rejected after restart")
 	}
+}
+
+func TestManagerLoadManagedBundleKeepsPreviousActiveOnInvalidArtifactDigest(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+	store := openTestStore(t)
+	defer store.Close()
+	signer := testSigner(t, now)
+	validRuntimeEnvelope := signedBundleData(t, signer, now, now.Add(time.Hour))
+	currentAssignment := signedManagedAssignment(t, signer, managedTestAssignment(now, signer.KeyID, 1, validRuntimeEnvelope), now.Add(time.Hour))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(currentAssignment)
+	}))
+	defer server.Close()
+	manager := testManager(store, signer, now)
+
+	validRecord, err := manager.LoadManagedBundle(ctx, managedAssignmentSource(server.URL, signer.KeyID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	invalidAssignment := managedTestAssignment(now, signer.KeyID, 2, signedBundleData(t, signer, now, now.Add(time.Hour)))
+	invalidAssignment.Artifacts[0].SHA256 = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+	currentAssignment = signedManagedAssignment(t, signer, invalidAssignment, now.Add(time.Hour))
+
+	_, err = manager.LoadManagedBundle(ctx, managedAssignmentSource(server.URL, signer.KeyID))
+	if err == nil || !strings.Contains(err.Error(), "digest mismatch") {
+		t.Fatalf("expected artifact digest mismatch rejection, got %v", err)
+	}
+	assertActiveManagedAssignment(t, store, ctx, 1, currentAssignment.PayloadSHA256, validRecord.PayloadSHA256)
+}
+
+func TestManagerLoadManagedBundleKeepsPreviousActiveOnRuntimeArtifactVerificationFailure(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+	store := openTestStore(t)
+	defer store.Close()
+	signer := testSigner(t, now)
+	validRuntimeEnvelope := signedBundleData(t, signer, now, now.Add(time.Hour))
+	currentAssignment := signedManagedAssignment(t, signer, managedTestAssignment(now, signer.KeyID, 1, validRuntimeEnvelope), now.Add(time.Hour))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(currentAssignment)
+	}))
+	defer server.Close()
+	manager := testManager(store, signer, now)
+
+	validRecord, err := manager.LoadManagedBundle(ctx, managedAssignmentSource(server.URL, signer.KeyID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherSigner := testSigner(t, now)
+	otherSigner.KeyID = "other-dev-local"
+	invalidRuntimeEnvelope := signedBundleData(t, otherSigner, now, now.Add(time.Hour))
+	currentAssignment = signedManagedAssignment(t, signer, managedTestAssignment(now, signer.KeyID, 2, invalidRuntimeEnvelope), now.Add(time.Hour))
+
+	_, err = manager.LoadManagedBundle(ctx, managedAssignmentSource(server.URL, signer.KeyID))
+	if err == nil || !strings.Contains(err.Error(), "signature invalid") {
+		t.Fatalf("expected runtime artifact signature rejection, got %v", err)
+	}
+	assertActiveManagedAssignment(t, store, ctx, 1, currentAssignment.PayloadSHA256, validRecord.PayloadSHA256)
 }
 
 func TestManagerExecutesRequiredActionThroughPlanAndDeduplicates(t *testing.T) {
@@ -629,6 +695,38 @@ func managedTestAssignment(now time.Time, trustKeyID string, version int64, runt
 			SHA256:       domain.SHA256JSON(runtimeEnvelope),
 			Envelope:     append([]byte(nil), runtimeEnvelope...),
 		}},
+	}
+}
+
+func managedAssignmentSource(serverURL, trustKeyID string) *kliqbundle.ManagedAssignmentSource {
+	return &kliqbundle.ManagedAssignmentSource{
+		BaseURL:     serverURL,
+		KLIQID:      "kliq.test",
+		Environment: "prod",
+		Stage:       "prod",
+		Scope:       "edge-prod",
+		TrustKeyID:  trustKeyID,
+	}
+}
+
+func assertActiveManagedAssignment(t *testing.T, store actionstate.Store, ctx context.Context, version int64, rejectedDigest, activeBundleDigest string) {
+	t.Helper()
+	state, err := store.KLIQManagementState(ctx, "kliq.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.ActiveAssignmentVersion != version {
+		t.Fatalf("expected active assignment version %d to remain, got %#v", version, state)
+	}
+	if state.ActiveAssignmentDigest == rejectedDigest {
+		t.Fatalf("expected rejected assignment digest not to activate, got %#v", state)
+	}
+	bundle, err := store.LastBundle(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bundle.PayloadSHA256 != activeBundleDigest {
+		t.Fatalf("expected previous bundle digest %q to remain active, got %#v", activeBundleDigest, bundle)
 	}
 }
 

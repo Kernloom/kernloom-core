@@ -14,6 +14,7 @@ import (
 	"github.com/kernloom/kernloom-core/internal/core/signing"
 	"github.com/kernloom/kernloom-core/internal/forge/jobs"
 	"github.com/kernloom/kernloom-core/internal/forge/management"
+	"github.com/kernloom/kernloom-core/internal/storage/artifactstore"
 )
 
 type Server struct {
@@ -22,6 +23,7 @@ type Server struct {
 	Store          jobs.Store
 	Management     management.Store
 	ManagementSign signing.Signer
+	Artifacts      artifactstore.ArtifactStore
 	KLIQService    *authn.KLIQServiceTokenIssuer
 	DevManagement  bool
 }
@@ -53,6 +55,8 @@ func (s Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/kliq/heartbeat", s.requireAuth(s.recordKLIQHeartbeat))
 	mux.HandleFunc("POST /v1/kliq/status-reports", s.requireAuth(s.recordKLIQStatusReport))
 	mux.HandleFunc("GET /v1/kliq/status-reports/{kliq_id}", s.requireAuth(s.getKLIQStatusReport))
+	mux.HandleFunc("POST /v1/kliq/audit-events", s.requireAuth(s.recordKLIQAuditUpload))
+	mux.HandleFunc("POST /v1/kliq/service-token/refresh", s.requireAuth(s.refreshKLIQServiceToken))
 	return mux
 }
 
@@ -76,7 +80,9 @@ func (s Server) requireAuth(next func(http.ResponseWriter, *http.Request, authn.
 			writeError(w, http.StatusUnauthorized, "invalid_token")
 			return
 		}
-		next(w, r.WithContext(authn.WithPrincipal(r.Context(), principal)), principal)
+		ctx := authn.WithPrincipal(r.Context(), principal)
+		ctx = management.WithAuditActor(ctx, principal.Subject)
+		next(w, r.WithContext(ctx), principal)
 	}
 }
 

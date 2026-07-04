@@ -102,6 +102,34 @@ func (s *SQLiteStore) migrate(ctx context.Context) error {
 			active_assignment_expires_at TEXT NOT NULL,
 			active_assignment_activated_at TEXT NOT NULL
 		)`,
+		`CREATE TABLE IF NOT EXISTS kliq_assignment_artifacts (
+			kliq_id TEXT NOT NULL,
+			assignment_id TEXT NOT NULL,
+			assignment_version INTEGER NOT NULL,
+			artifact_type TEXT NOT NULL,
+			artifact_id TEXT NOT NULL,
+			artifact_ref TEXT NOT NULL DEFAULT '',
+			sha256 TEXT NOT NULL,
+			envelope_json BLOB NOT NULL,
+			activated_at TEXT NOT NULL,
+			PRIMARY KEY (kliq_id, assignment_id, artifact_type, artifact_id)
+		)`,
+		`CREATE TABLE IF NOT EXISTS kliq_credentials (
+			id INTEGER PRIMARY KEY CHECK (id = 1),
+			kliq_id TEXT NOT NULL,
+			node_id TEXT NOT NULL,
+			environment TEXT NOT NULL,
+			stage TEXT NOT NULL,
+			scope TEXT NOT NULL,
+			trust_key_id TEXT NOT NULL,
+			assignment_url TEXT NOT NULL,
+			public_key_pem TEXT NOT NULL,
+			private_key_pem TEXT NOT NULL,
+			service_token TEXT NOT NULL,
+			service_token_expires_at TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		)`,
 		`DROP INDEX IF EXISTS runtime_action_leases_dedup`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS runtime_action_leases_dedup
 			ON runtime_action_leases(adapter_id, capability_id, action_type, target_scope, target_key)
@@ -119,8 +147,16 @@ func (s *SQLiteStore) migrate(ctx context.Context) error {
 			runtime_action_id TEXT NOT NULL,
 			status TEXT NOT NULL,
 			payload TEXT NOT NULL,
-			created_at TEXT NOT NULL
+			created_at TEXT NOT NULL,
+			retry_count INTEGER NOT NULL DEFAULT 0,
+			last_attempt_at TEXT NOT NULL DEFAULT '',
+			uploaded_at TEXT NOT NULL DEFAULT '',
+			last_error TEXT NOT NULL DEFAULT ''
 		)`,
+		`ALTER TABLE audit_spool ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE audit_spool ADD COLUMN last_attempt_at TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE audit_spool ADD COLUMN uploaded_at TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE audit_spool ADD COLUMN last_error TEXT NOT NULL DEFAULT ''`,
 	}
 	for _, statement := range statements {
 		if _, err := s.db.ExecContext(ctx, statement); err != nil {
@@ -134,20 +170,7 @@ func (s *SQLiteStore) migrate(ctx context.Context) error {
 }
 
 func (s *SQLiteStore) SaveBundle(ctx context.Context, record BundleRecord) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO bundle_cache (
-		id, bundle_id, policy_id, source_commit, correlation_id, key_id, payload_sha256, bundle_source, envelope_json, expires_at, verified_at
-	) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	ON CONFLICT(id) DO UPDATE SET
-		bundle_id = excluded.bundle_id,
-		policy_id = excluded.policy_id,
-		source_commit = excluded.source_commit,
-		correlation_id = excluded.correlation_id,
-		key_id = excluded.key_id,
-		payload_sha256 = excluded.payload_sha256,
-		bundle_source = excluded.bundle_source,
-		envelope_json = excluded.envelope_json,
-		expires_at = excluded.expires_at,
-		verified_at = excluded.verified_at`,
+	_, err := s.db.ExecContext(ctx, saveBundleSQL(),
 		record.BundleID,
 		record.PolicyID,
 		record.SourceCommit,
@@ -160,6 +183,110 @@ func (s *SQLiteStore) SaveBundle(ctx context.Context, record BundleRecord) error
 		formatTime(record.VerifiedAt),
 	)
 	return err
+}
+
+func (s *SQLiteStore) SaveManagedBundleActivation(ctx context.Context, record BundleRecord, state KLIQManagementState, artifacts []AssignmentArtifactRecord) error {
+	if err := validateKLIQManagementState(state); err != nil {
+		return err
+	}
+	for _, artifact := range artifacts {
+		if err := validateAssignmentArtifactRecord(artifact); err != nil {
+			return err
+		}
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, saveBundleSQL(),
+		record.BundleID,
+		record.PolicyID,
+		record.SourceCommit,
+		record.CorrelationID,
+		record.KeyID,
+		record.PayloadSHA256,
+		record.BundleSource,
+		record.EnvelopeJSON,
+		formatTime(record.ExpiresAt),
+		formatTime(record.VerifiedAt),
+	); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, saveKLIQManagementStateSQL(),
+		state.KLIQID,
+		state.ActiveAssignmentID,
+		state.ActiveAssignmentVersion,
+		state.ActiveAssignmentSourceCommit,
+		state.ActiveAssignmentDigest,
+		formatTime(state.ActiveAssignmentExpiresAt),
+		formatTime(state.ActiveAssignmentActivatedAt),
+	); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM kliq_assignment_artifacts WHERE kliq_id = ?`, state.KLIQID); err != nil {
+		return err
+	}
+	for _, artifact := range artifacts {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO kliq_assignment_artifacts (
+			kliq_id, assignment_id, assignment_version, artifact_type, artifact_id, artifact_ref, sha256, envelope_json, activated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			artifact.KLIQID,
+			artifact.AssignmentID,
+			artifact.AssignmentVersion,
+			artifact.ArtifactType,
+			artifact.ArtifactID,
+			artifact.ArtifactRef,
+			artifact.SHA256,
+			artifact.EnvelopeJSON,
+			formatTime(artifact.ActivatedAt),
+		); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func validateAssignmentArtifactRecord(record AssignmentArtifactRecord) error {
+	required := map[string]string{
+		"kliq_id":       record.KLIQID,
+		"assignment_id": record.AssignmentID,
+		"artifact_type": record.ArtifactType,
+		"artifact_id":   record.ArtifactID,
+		"sha256":        record.SHA256,
+	}
+	for field, value := range required {
+		if value == "" {
+			return fmt.Errorf("assignment artifact record requires %s", field)
+		}
+	}
+	if record.AssignmentVersion <= 0 {
+		return fmt.Errorf("assignment artifact record requires positive assignment_version")
+	}
+	if len(record.EnvelopeJSON) == 0 {
+		return fmt.Errorf("assignment artifact record requires envelope_json")
+	}
+	if record.ActivatedAt.IsZero() {
+		return fmt.Errorf("assignment artifact record requires activated_at")
+	}
+	return nil
+}
+
+func saveBundleSQL() string {
+	return `INSERT INTO bundle_cache (
+		id, bundle_id, policy_id, source_commit, correlation_id, key_id, payload_sha256, bundle_source, envelope_json, expires_at, verified_at
+	) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	ON CONFLICT(id) DO UPDATE SET
+		bundle_id = excluded.bundle_id,
+		policy_id = excluded.policy_id,
+		source_commit = excluded.source_commit,
+		correlation_id = excluded.correlation_id,
+		key_id = excluded.key_id,
+		payload_sha256 = excluded.payload_sha256,
+		bundle_source = excluded.bundle_source,
+		envelope_json = excluded.envelope_json,
+		expires_at = excluded.expires_at,
+		verified_at = excluded.verified_at`
 }
 
 func (s *SQLiteStore) LastBundle(ctx context.Context) (BundleRecord, error) {
@@ -184,7 +311,127 @@ func (s *SQLiteStore) LastBundle(ctx context.Context) (BundleRecord, error) {
 	return record, nil
 }
 
+func (s *SQLiteStore) SaveKLIQCredential(ctx context.Context, credential KLIQCredential) error {
+	required := map[string]string{
+		"kliq_id":         credential.KLIQID,
+		"node_id":         credential.NodeID,
+		"environment":     credential.Environment,
+		"stage":           credential.Stage,
+		"scope":           credential.Scope,
+		"trust_key_id":    credential.TrustKeyID,
+		"assignment_url":  credential.AssignmentURL,
+		"public_key_pem":  credential.PublicKeyPEM,
+		"private_key_pem": credential.PrivateKeyPEM,
+		"service_token":   credential.ServiceToken,
+	}
+	for field, value := range required {
+		if value == "" {
+			return fmt.Errorf("kliq credential requires %s", field)
+		}
+	}
+	if credential.ServiceTokenExpiresAt.IsZero() {
+		return fmt.Errorf("kliq credential requires service_token_expires_at")
+	}
+	if credential.CreatedAt.IsZero() {
+		credential.CreatedAt = time.Now().UTC()
+	}
+	if credential.UpdatedAt.IsZero() {
+		credential.UpdatedAt = credential.CreatedAt
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO kliq_credentials (
+		id, kliq_id, node_id, environment, stage, scope, trust_key_id, assignment_url, public_key_pem,
+		private_key_pem, service_token, service_token_expires_at, created_at, updated_at
+	) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	ON CONFLICT(id) DO UPDATE SET
+		kliq_id = excluded.kliq_id,
+		node_id = excluded.node_id,
+		environment = excluded.environment,
+		stage = excluded.stage,
+		scope = excluded.scope,
+		trust_key_id = excluded.trust_key_id,
+		assignment_url = excluded.assignment_url,
+		public_key_pem = excluded.public_key_pem,
+		private_key_pem = excluded.private_key_pem,
+		service_token = excluded.service_token,
+		service_token_expires_at = excluded.service_token_expires_at,
+		updated_at = excluded.updated_at`,
+		credential.KLIQID,
+		credential.NodeID,
+		credential.Environment,
+		credential.Stage,
+		credential.Scope,
+		credential.TrustKeyID,
+		credential.AssignmentURL,
+		credential.PublicKeyPEM,
+		credential.PrivateKeyPEM,
+		credential.ServiceToken,
+		formatTime(credential.ServiceTokenExpiresAt),
+		formatTime(credential.CreatedAt),
+		formatTime(credential.UpdatedAt),
+	)
+	return err
+}
+
+func (s *SQLiteStore) KLIQCredential(ctx context.Context) (KLIQCredential, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT
+		kliq_id, node_id, environment, stage, scope, trust_key_id, assignment_url, public_key_pem,
+		private_key_pem, service_token, service_token_expires_at, created_at, updated_at
+		FROM kliq_credentials WHERE id = 1`)
+	var credential KLIQCredential
+	var tokenExpiresAt, createdAt, updatedAt string
+	if err := row.Scan(
+		&credential.KLIQID,
+		&credential.NodeID,
+		&credential.Environment,
+		&credential.Stage,
+		&credential.Scope,
+		&credential.TrustKeyID,
+		&credential.AssignmentURL,
+		&credential.PublicKeyPEM,
+		&credential.PrivateKeyPEM,
+		&credential.ServiceToken,
+		&tokenExpiresAt,
+		&createdAt,
+		&updatedAt,
+	); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return KLIQCredential{}, ErrNotFound
+		}
+		return KLIQCredential{}, err
+	}
+	var err error
+	credential.ServiceTokenExpiresAt, err = parseTime(tokenExpiresAt)
+	if err != nil {
+		return KLIQCredential{}, err
+	}
+	credential.CreatedAt, err = parseTime(createdAt)
+	if err != nil {
+		return KLIQCredential{}, err
+	}
+	credential.UpdatedAt, err = parseTime(updatedAt)
+	if err != nil {
+		return KLIQCredential{}, err
+	}
+	return credential, nil
+}
+
 func (s *SQLiteStore) SaveKLIQManagementState(ctx context.Context, state KLIQManagementState) error {
+	if err := validateKLIQManagementState(state); err != nil {
+		return err
+	}
+	_, err := s.db.ExecContext(ctx, saveKLIQManagementStateSQL(),
+		state.KLIQID,
+		state.ActiveAssignmentID,
+		state.ActiveAssignmentVersion,
+		state.ActiveAssignmentSourceCommit,
+		state.ActiveAssignmentDigest,
+		formatTime(state.ActiveAssignmentExpiresAt),
+		formatTime(state.ActiveAssignmentActivatedAt),
+	)
+	return err
+}
+
+func validateKLIQManagementState(state KLIQManagementState) error {
 	if state.KLIQID == "" {
 		return fmt.Errorf("kliq management state requires kliq_id")
 	}
@@ -206,7 +453,11 @@ func (s *SQLiteStore) SaveKLIQManagementState(ctx context.Context, state KLIQMan
 	if state.ActiveAssignmentActivatedAt.IsZero() {
 		return fmt.Errorf("kliq management state requires active_assignment_activated_at")
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO kliq_management_state (
+	return nil
+}
+
+func saveKLIQManagementStateSQL() string {
+	return `INSERT INTO kliq_management_state (
 		kliq_id, active_assignment_id, active_assignment_version, active_assignment_source_commit,
 		active_assignment_digest, active_assignment_expires_at, active_assignment_activated_at
 	) VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -216,16 +467,7 @@ func (s *SQLiteStore) SaveKLIQManagementState(ctx context.Context, state KLIQMan
 		active_assignment_source_commit = excluded.active_assignment_source_commit,
 		active_assignment_digest = excluded.active_assignment_digest,
 		active_assignment_expires_at = excluded.active_assignment_expires_at,
-		active_assignment_activated_at = excluded.active_assignment_activated_at`,
-		state.KLIQID,
-		state.ActiveAssignmentID,
-		state.ActiveAssignmentVersion,
-		state.ActiveAssignmentSourceCommit,
-		state.ActiveAssignmentDigest,
-		formatTime(state.ActiveAssignmentExpiresAt),
-		formatTime(state.ActiveAssignmentActivatedAt),
-	)
-	return err
+		active_assignment_activated_at = excluded.active_assignment_activated_at`
 }
 
 func (s *SQLiteStore) KLIQManagementState(ctx context.Context, kliqID string) (KLIQManagementState, error) {
@@ -259,6 +501,40 @@ func (s *SQLiteStore) KLIQManagementState(ctx context.Context, kliqID string) (K
 		return KLIQManagementState{}, err
 	}
 	return state, nil
+}
+
+func (s *SQLiteStore) AssignmentArtifacts(ctx context.Context, kliqID string) ([]AssignmentArtifactRecord, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT
+		kliq_id, assignment_id, assignment_version, artifact_type, artifact_id, artifact_ref, sha256, envelope_json, activated_at
+		FROM kliq_assignment_artifacts WHERE kliq_id = ? ORDER BY artifact_type, artifact_id`, kliqID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var records []AssignmentArtifactRecord
+	for rows.Next() {
+		var record AssignmentArtifactRecord
+		var activatedAt string
+		if err := rows.Scan(
+			&record.KLIQID,
+			&record.AssignmentID,
+			&record.AssignmentVersion,
+			&record.ArtifactType,
+			&record.ArtifactID,
+			&record.ArtifactRef,
+			&record.SHA256,
+			&record.EnvelopeJSON,
+			&activatedAt,
+		); err != nil {
+			return nil, err
+		}
+		record.ActivatedAt, err = parseTime(activatedAt)
+		if err != nil {
+			return nil, err
+		}
+		records = append(records, record)
+	}
+	return records, rows.Err()
 }
 
 func (s *SQLiteStore) UpsertLease(ctx context.Context, lease RuntimeActionLease) error {
@@ -379,19 +655,23 @@ func (s *SQLiteStore) JournalEntries(ctx context.Context, runtimeActionID string
 }
 
 func (s *SQLiteStore) AppendAudit(ctx context.Context, record AuditRecord) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO audit_spool (id, runtime_action_id, status, payload, created_at)
-		VALUES (?, ?, ?, ?, ?)`,
+	_, err := s.db.ExecContext(ctx, `INSERT INTO audit_spool (id, runtime_action_id, status, payload, created_at, retry_count, last_attempt_at, uploaded_at, last_error)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		record.ID,
 		record.RuntimeActionID,
 		record.Status,
 		record.Payload,
 		formatTime(record.CreatedAt),
+		record.RetryCount,
+		formatOptionalTime(record.LastAttemptAt),
+		formatOptionalTime(record.UploadedAt),
+		record.LastError,
 	)
 	return err
 }
 
 func (s *SQLiteStore) PendingAudits(ctx context.Context) ([]AuditRecord, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, runtime_action_id, status, payload, created_at
+	rows, err := s.db.QueryContext(ctx, `SELECT id, runtime_action_id, status, payload, created_at, retry_count, last_attempt_at, uploaded_at, last_error
 		FROM audit_spool WHERE status = ? ORDER BY created_at`, "pending_upload")
 	if err != nil {
 		return nil, err
@@ -400,8 +680,8 @@ func (s *SQLiteStore) PendingAudits(ctx context.Context) ([]AuditRecord, error) 
 	var records []AuditRecord
 	for rows.Next() {
 		var record AuditRecord
-		var createdAt string
-		if err := rows.Scan(&record.ID, &record.RuntimeActionID, &record.Status, &record.Payload, &createdAt); err != nil {
+		var createdAt, lastAttemptAt, uploadedAt string
+		if err := rows.Scan(&record.ID, &record.RuntimeActionID, &record.Status, &record.Payload, &createdAt, &record.RetryCount, &lastAttemptAt, &uploadedAt, &record.LastError); err != nil {
 			return nil, err
 		}
 		parsed, err := parseTime(createdAt)
@@ -409,9 +689,31 @@ func (s *SQLiteStore) PendingAudits(ctx context.Context) ([]AuditRecord, error) 
 			return nil, err
 		}
 		record.CreatedAt = parsed
+		record.LastAttemptAt, err = parseOptionalTime(lastAttemptAt)
+		if err != nil {
+			return nil, err
+		}
+		record.UploadedAt, err = parseOptionalTime(uploadedAt)
+		if err != nil {
+			return nil, err
+		}
 		records = append(records, record)
 	}
 	return records, rows.Err()
+}
+
+func (s *SQLiteStore) MarkAuditUploaded(ctx context.Context, id string, uploadedAt time.Time) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE audit_spool
+		SET status = ?, uploaded_at = ?, last_attempt_at = ?, last_error = ''
+		WHERE id = ?`, "uploaded", formatTime(uploadedAt), formatTime(uploadedAt), id)
+	return err
+}
+
+func (s *SQLiteStore) MarkAuditFailed(ctx context.Context, id string, attemptedAt time.Time, message string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE audit_spool
+		SET status = ?, retry_count = retry_count + 1, last_attempt_at = ?, last_error = ?
+		WHERE id = ?`, "pending_upload", formatTime(attemptedAt), message, id)
+	return err
 }
 
 type rowScanner interface {
@@ -492,12 +794,26 @@ func formatTime(value time.Time) string {
 	return value.UTC().Format(time.RFC3339Nano)
 }
 
+func formatOptionalTime(value time.Time) string {
+	if value.IsZero() {
+		return ""
+	}
+	return formatTime(value)
+}
+
 func parseTime(value string) (time.Time, error) {
 	parsed, err := time.Parse(time.RFC3339Nano, value)
 	if err != nil {
 		return time.Time{}, err
 	}
 	return parsed.UTC(), nil
+}
+
+func parseOptionalTime(value string) (time.Time, error) {
+	if value == "" {
+		return time.Time{}, nil
+	}
+	return parseTime(value)
 }
 
 func boolInt(value bool) int {

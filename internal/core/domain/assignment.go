@@ -98,6 +98,16 @@ type KLIQAssignedArtifact struct {
 	Envelope     json.RawMessage `json:"envelope"`
 }
 
+type AdapterAssignment struct {
+	Kind                string    `json:"kind"`
+	AdapterID           string    `json:"adapter_id"`
+	Endpoint            string    `json:"endpoint"`
+	AllowedCapabilities []string  `json:"allowed_capabilities,omitempty"`
+	GrantRefs           []string  `json:"grant_refs,omitempty"`
+	Scope               string    `json:"scope,omitempty"`
+	CreatedAt           time.Time `json:"created_at,omitempty"`
+}
+
 type AssignmentManifest struct {
 	Kind              string           `json:"kind"`
 	AssignmentID      string           `json:"assignment_id"`
@@ -159,7 +169,10 @@ type KLIQHeartbeat struct {
 	Stage             string    `json:"stage"`
 	Scope             string    `json:"scope"`
 	Version           string    `json:"version,omitempty"`
+	AssignmentID      string    `json:"assignment_id,omitempty"`
 	AssignmentVersion int64     `json:"assignment_version"`
+	BundleID          string    `json:"bundle_id,omitempty"`
+	SourceCommit      string    `json:"source_commit,omitempty"`
 	Status            string    `json:"status"`
 	Findings          []string  `json:"findings,omitempty"`
 	ReportedAt        time.Time `json:"reported_at"`
@@ -170,12 +183,31 @@ type KLIQStatusReport struct {
 	Environment       string    `json:"environment"`
 	Stage             string    `json:"stage"`
 	Scope             string    `json:"scope"`
+	AssignmentID      string    `json:"assignment_id,omitempty"`
 	AssignmentVersion int64     `json:"assignment_version"`
+	BundleID          string    `json:"bundle_id,omitempty"`
+	SourceCommit      string    `json:"source_commit,omitempty"`
 	Status            string    `json:"status"`
 	Findings          []string  `json:"findings,omitempty"`
 	RuntimeActions    int       `json:"runtime_actions"`
 	PendingAudits     int       `json:"pending_audits"`
+	AdapterHealth     []string  `json:"adapter_health,omitempty"`
+	RuntimeSummary    string    `json:"runtime_summary,omitempty"`
+	AuditSpoolState   string    `json:"audit_spool_state,omitempty"`
 	ReportedAt        time.Time `json:"reported_at"`
+}
+
+type KLIQAuditUpload struct {
+	KLIQID          string          `json:"kliq_id"`
+	Environment     string          `json:"environment"`
+	Stage           string          `json:"stage"`
+	Scope           string          `json:"scope"`
+	AuditRecordID   string          `json:"audit_record_id"`
+	RuntimeActionID string          `json:"runtime_action_id"`
+	Payload         json.RawMessage `json:"payload,omitempty"`
+	PayloadSHA256   string          `json:"payload_sha256"`
+	CreatedAt       time.Time       `json:"created_at"`
+	UploadedAt      time.Time       `json:"uploaded_at"`
 }
 
 type KLIQUpdatePlan struct {
@@ -269,6 +301,15 @@ func RuntimeBundleArtifact(assignment KLIQAssignment) (KLIQAssignedArtifact, boo
 		}
 	}
 	return KLIQAssignedArtifact{}, false
+}
+
+func SupportedAssignmentArtifactType(artifactType string) bool {
+	switch artifactType {
+	case "runtime_bundle", "context_route_pack", "conformance_expectation", "adapter_assignment", "trust_bundle", "management_profile", "fallback_profile":
+		return true
+	default:
+		return false
+	}
 }
 
 func ValidateAssignedArtifactDigests(assignment KLIQAssignment) error {

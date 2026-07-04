@@ -1,0 +1,25 @@
+[Unit]
+Description=Kernloom KLIQ managed runtime daemon
+Documentation=docs/admin-template/kliq-managed-systemd.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/kernloom/kliq.env
+ExecStart=/usr/local/bin/kliq run \
+  --mode managed \
+  --forge-url ${KERNLOOM_FORGE_URL} \
+  --state ${KERNLOOM_KLIQ_STATE} \
+  --trust-bundle ${KERNLOOM_TRUST_BUNDLE} \
+  --status-listen ${KERNLOOM_KLIQ_STATUS_LISTEN}
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/kernloom/kliq
+
+[Install]
+WantedBy=multi-user.target

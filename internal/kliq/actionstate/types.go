@@ -26,6 +26,18 @@ type BundleRecord struct {
 	VerifiedAt    time.Time
 }
 
+type AssignmentArtifactRecord struct {
+	KLIQID            string
+	AssignmentID      string
+	AssignmentVersion int64
+	ArtifactType      string
+	ArtifactID        string
+	ArtifactRef       string
+	SHA256            string
+	EnvelopeJSON      []byte
+	ActivatedAt       time.Time
+}
+
 type KLIQManagementState struct {
 	KLIQID                       string
 	ActiveAssignmentID           string
@@ -34,6 +46,22 @@ type KLIQManagementState struct {
 	ActiveAssignmentDigest       string
 	ActiveAssignmentExpiresAt    time.Time
 	ActiveAssignmentActivatedAt  time.Time
+}
+
+type KLIQCredential struct {
+	KLIQID                string
+	NodeID                string
+	Environment           string
+	Stage                 string
+	Scope                 string
+	TrustKeyID            string
+	AssignmentURL         string
+	PublicKeyPEM          string
+	PrivateKeyPEM         string
+	ServiceToken          string
+	ServiceTokenExpiresAt time.Time
+	CreatedAt             time.Time
+	UpdatedAt             time.Time
 }
 
 type RuntimeActionLease struct {
@@ -147,11 +175,19 @@ type AuditRecord struct {
 	Status          string
 	Payload         string
 	CreatedAt       time.Time
+	RetryCount      int
+	LastAttemptAt   time.Time
+	UploadedAt      time.Time
+	LastError       string
 }
 
 type Store interface {
 	SaveBundle(ctx context.Context, record BundleRecord) error
 	LastBundle(ctx context.Context) (BundleRecord, error)
+	SaveManagedBundleActivation(ctx context.Context, record BundleRecord, state KLIQManagementState, artifacts []AssignmentArtifactRecord) error
+	AssignmentArtifacts(ctx context.Context, kliqID string) ([]AssignmentArtifactRecord, error)
+	SaveKLIQCredential(ctx context.Context, credential KLIQCredential) error
+	KLIQCredential(ctx context.Context) (KLIQCredential, error)
 	SaveKLIQManagementState(ctx context.Context, state KLIQManagementState) error
 	KLIQManagementState(ctx context.Context, kliqID string) (KLIQManagementState, error)
 	UpsertLease(ctx context.Context, lease RuntimeActionLease) error
@@ -164,5 +200,7 @@ type Store interface {
 	JournalEntries(ctx context.Context, runtimeActionID string) ([]JournalEntry, error)
 	AppendAudit(ctx context.Context, record AuditRecord) error
 	PendingAudits(ctx context.Context) ([]AuditRecord, error)
+	MarkAuditUploaded(ctx context.Context, id string, uploadedAt time.Time) error
+	MarkAuditFailed(ctx context.Context, id string, attemptedAt time.Time, message string) error
 	Close() error
 }

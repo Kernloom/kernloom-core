@@ -24,6 +24,7 @@ import (
 	"github.com/kernloom/kernloom-core/internal/forge/compiler"
 	"github.com/kernloom/kernloom-core/internal/forge/jobs"
 	"github.com/kernloom/kernloom-core/internal/forge/management"
+	"github.com/kernloom/kernloom-core/internal/storage/artifactstore"
 )
 
 var logger = slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{}))
@@ -96,6 +97,9 @@ func api(args []string) {
 	managementPostgresDSN := fs.String("management-postgres-dsn", "", "Postgres DSN for KLIQ management store")
 	devManagement := fs.Bool("dev-management", false, "enable explicit dev-only in-memory management store and manual assignment API")
 	kliqServiceTokenSecret := fs.String("kliq-service-token-secret", "", "HMAC secret for dev/local KLIQ service tokens; production should replace with mTLS-ready identity")
+	artifactStoreRoot := fs.String("artifact-store-root", "../enterprise-kernloom-policies/generated/artifact-store", "fs artifact store root for approved Forge artifacts")
+	artifactStoreOrg := fs.String("artifact-store-org", "kernloom", "artifact store organization path segment")
+	artifactStoreEnvironment := fs.String("artifact-store-env", "dev", "artifact store environment path segment")
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
@@ -151,6 +155,7 @@ func api(args []string) {
 		Store:          store,
 		Management:     managementBackend,
 		ManagementSign: managementSigner,
+		Artifacts:      artifactstore.NewFSStore(*artifactStoreRoot, *artifactStoreOrg, *artifactStoreEnvironment),
 		KLIQService:    kliqService,
 		DevManagement:  *devManagement,
 	}

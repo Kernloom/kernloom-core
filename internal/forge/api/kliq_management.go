@@ -4,7 +4,9 @@
 package api
 
 import (
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"net/http"
@@ -14,6 +16,7 @@ import (
 
 	"github.com/kernloom/kernloom-core/internal/api/authn"
 	"github.com/kernloom/kernloom-core/internal/api/authz"
+	coreartifact "github.com/kernloom/kernloom-core/internal/core/artifact"
 	"github.com/kernloom/kernloom-core/internal/core/domain"
 	"github.com/kernloom/kernloom-core/internal/core/signing"
 	"github.com/kernloom/kernloom-core/internal/forge/management"
@@ -50,6 +53,11 @@ type enrollmentRequest struct {
 type enrollmentResponse struct {
 	Registration domain.KLIQRegistration `json:"registration"`
 	ServiceToken string                  `json:"service_token,omitempty"`
+}
+
+type serviceTokenRefreshResponse struct {
+	ServiceToken string    `json:"service_token"`
+	ExpiresAt    time.Time `json:"expires_at"`
 }
 
 type assignmentPlanRequest struct {
@@ -133,8 +141,13 @@ func (s Server) enrollKLIQ(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "missing_identity_material")
 		return
 	}
+	if err := validateIdentityMaterial(req.PublicKeyPEM, req.CSRPEM); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_identity_material")
+		return
+	}
 	now := time.Now().UTC()
-	if _, err := s.Management.UseEnrollmentToken(r.Context(), req.EnrollmentToken, req.Environment, req.Stage, req.Scope, now); err != nil {
+	token, err := s.Management.UseEnrollmentToken(r.Context(), req.EnrollmentToken, req.Environment, req.Stage, req.Scope, now)
+	if err != nil {
 		writeError(w, http.StatusForbidden, "invalid_enrollment_token")
 		return
 	}
@@ -172,7 +185,11 @@ func (s Server) enrollKLIQ(w http.ResponseWriter, r *http.Request) {
 		Status:            "active",
 		RegisteredAt:      now,
 	}
-	if err := s.Management.Register(r.Context(), registration); err != nil {
+	registerCtx := management.WithAuditMetadata(r.Context(), map[string]any{
+		"enrollment_token_id": token.TokenID,
+		"kliq_id":             kliqID,
+	})
+	if err := s.Management.Register(registerCtx, registration); err != nil {
 		writeError(w, http.StatusInternalServerError, "registration_failed")
 		return
 	}
@@ -186,6 +203,38 @@ func (s Server) enrollKLIQ(w http.ResponseWriter, r *http.Request) {
 		serviceToken = token
 	}
 	writeJSON(w, http.StatusCreated, enrollmentResponse{Registration: registration, ServiceToken: serviceToken})
+}
+
+func (s Server) refreshKLIQServiceToken(w http.ResponseWriter, r *http.Request, principal authn.Principal) {
+	if s.Management == nil || s.KLIQService == nil {
+		writeError(w, http.StatusInternalServerError, "kliq_service_refresh_not_configured")
+		return
+	}
+	kliqID := authn.PrincipalKLIQID(principal)
+	registration, err := s.Management.Registration(r.Context(), kliqID)
+	if errors.Is(err, management.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "kliq_registration_not_found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "registration_read_failed")
+		return
+	}
+	if err := ensureKLIQRegistrationActive(registration); err != nil {
+		writeError(w, http.StatusForbidden, "kliq_registration_revoked")
+		return
+	}
+	if err := authorizeKLIQServicePrincipal(principal, registration); err != nil {
+		writeError(w, http.StatusForbidden, "forbidden")
+		return
+	}
+	token, err := s.KLIQService.Issue(registration.KLIQID, registration.Environment, registration.Stage, registration.Scope, 24*time.Hour)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "service_token_issue_failed")
+		return
+	}
+	expiresAt := time.Now().UTC().Add(24 * time.Hour)
+	writeJSON(w, http.StatusOK, serviceTokenRefreshResponse{ServiceToken: token, ExpiresAt: expiresAt})
 }
 
 func (s Server) revokeEnrollmentToken(w http.ResponseWriter, r *http.Request, principal authn.Principal) {
@@ -226,6 +275,10 @@ func (s Server) planKLIQAssignment(w http.ResponseWriter, r *http.Request, princ
 		writeError(w, http.StatusInternalServerError, "kliq_management_not_configured")
 		return
 	}
+	if s.Artifacts == nil {
+		writeError(w, http.StatusInternalServerError, "artifact_store_not_configured")
+		return
+	}
 	var req assignmentPlanRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_json")
@@ -256,6 +309,11 @@ func (s Server) planKLIQAssignment(w http.ResponseWriter, r *http.Request, princ
 		writeError(w, http.StatusBadRequest, "invalid_assignment_plan")
 		return
 	}
+	artifacts, err := s.resolveAssignmentArtifacts(r, req)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	version, err := s.Management.NextAssignmentVersion(r.Context(), registration.KLIQID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "assignment_version_failed")
@@ -267,7 +325,7 @@ func (s Server) planKLIQAssignment(w http.ResponseWriter, r *http.Request, princ
 	}
 	now := time.Now().UTC()
 	assignment := domain.KLIQAssignment{
-		AssignmentID:      "kliq_assignment." + registration.KLIQID + "." + req.SourceCommit,
+		AssignmentID:      fmt.Sprintf("kliq_assignment.%s.%s.v%d", registration.KLIQID, req.SourceCommit, version),
 		AssignmentVersion: version,
 		KLIQID:            registration.KLIQID,
 		Environment:       registration.Environment,
@@ -279,7 +337,7 @@ func (s Server) planKLIQAssignment(w http.ResponseWriter, r *http.Request, princ
 		CreatedAt:         now,
 		ExpiresAt:         req.ExpiresAt.UTC(),
 		ApprovedRollback:  req.ApprovedRollback,
-		Artifacts:         append([]domain.KLIQAssignedArtifact(nil), req.Artifacts...),
+		Artifacts:         artifacts,
 		Status:            "active",
 	}
 	envelope, err := s.signAndStoreAssignment(r, assignment)
@@ -289,15 +347,125 @@ func (s Server) planKLIQAssignment(w http.ResponseWriter, r *http.Request, princ
 	}
 	_ = s.Management.SaveAuditEvent(r.Context(), domain.ManagementAuditEvent{
 		EventType:   "assignment_planned",
+		Actor:       principal.Subject,
 		TargetType:  "kliq_assignment",
 		TargetID:    assignment.AssignmentID,
 		KLIQID:      assignment.KLIQID,
 		Environment: assignment.Environment,
 		Stage:       assignment.Stage,
 		Scope:       assignment.Scope,
-		CreatedAt:   now,
+		Metadata: map[string]any{
+			"assignment_version": assignment.AssignmentVersion,
+			"source_commit":      assignment.SourceCommit,
+		},
+		CreatedAt: now,
 	})
 	writeJSON(w, http.StatusCreated, envelope)
+}
+
+func (s Server) resolveAssignmentArtifacts(r *http.Request, req assignmentPlanRequest) ([]domain.KLIQAssignedArtifact, error) {
+	artifacts := make([]domain.KLIQAssignedArtifact, 0, len(req.Artifacts))
+	for _, requested := range req.Artifacts {
+		if len(requested.Envelope) > 0 && strings.TrimSpace(string(requested.Envelope)) != "null" {
+			return nil, fmt.Errorf("raw_artifact_envelope_not_allowed")
+		}
+		if strings.TrimSpace(requested.ArtifactType) == "" || strings.TrimSpace(requested.ArtifactID) == "" {
+			return nil, fmt.Errorf("invalid_artifact_ref")
+		}
+		if !allowedAssignmentArtifactType(requested.ArtifactType) {
+			return nil, fmt.Errorf("unsupported_assignment_artifact_type")
+		}
+		ref := coreartifact.Ref{
+			URI:    strings.TrimSpace(requested.ArtifactRef),
+			SHA256: strings.TrimSpace(requested.SHA256),
+		}
+		if ref.URI == "" || ref.SHA256 == "" {
+			return nil, fmt.Errorf("invalid_artifact_ref")
+		}
+		payload, err := s.Artifacts.Get(r.Context(), ref)
+		if err != nil {
+			return nil, fmt.Errorf("artifact_ref_unavailable")
+		}
+		var envelope signing.SignedEnvelope
+		if err := json.Unmarshal(payload, &envelope); err != nil {
+			return nil, fmt.Errorf("artifact_ref_not_signed_envelope")
+		}
+		if envelope.Kind != "SignedEnvelope" || envelope.PayloadSHA256 == "" {
+			return nil, fmt.Errorf("artifact_ref_not_signed_envelope")
+		}
+		if err := s.verifyAssignmentArtifactEnvelope(r, requested.ArtifactType, envelope); err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(envelope.SourceCommit) != strings.TrimSpace(req.SourceCommit) {
+			return nil, fmt.Errorf("artifact_source_commit_mismatch")
+		}
+		artifacts = append(artifacts, domain.KLIQAssignedArtifact{
+			ArtifactType: strings.TrimSpace(requested.ArtifactType),
+			ArtifactID:   strings.TrimSpace(requested.ArtifactID),
+			ArtifactRef:  ref.URI,
+			SHA256:       ref.SHA256,
+			Envelope:     json.RawMessage(payload),
+		})
+	}
+	return artifacts, nil
+}
+
+func allowedAssignmentArtifactType(artifactType string) bool {
+	return domain.SupportedAssignmentArtifactType(strings.TrimSpace(artifactType))
+}
+
+func (s Server) verifyAssignmentArtifactEnvelope(r *http.Request, artifactType string, envelope signing.SignedEnvelope) error {
+	verifier, ok := s.ManagementSign.(signing.Verifier)
+	if !ok {
+		return fmt.Errorf("artifact_signature_verifier_unavailable")
+	}
+	result, err := verifier.Verify(r.Context(), envelope)
+	if err != nil {
+		return fmt.Errorf("artifact_signature_verification_failed")
+	}
+	if !result.Valid {
+		return fmt.Errorf("artifact_signature_invalid")
+	}
+	if err := validateAssignmentArtifactPayloadType(artifactType, envelope.Payload); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateAssignmentArtifactPayloadType(artifactType string, payload []byte) error {
+	var header struct {
+		Kind     string `json:"kind"`
+		Metadata struct {
+			ArtifactType string `json:"artifact_type"`
+		} `json:"metadata"`
+	}
+	if err := json.Unmarshal(payload, &header); err != nil {
+		return fmt.Errorf("artifact_payload_invalid")
+	}
+	if expected := expectedAssignmentArtifactKind(artifactType); expected != "" && header.Kind != expected {
+		return fmt.Errorf("artifact_payload_kind_mismatch")
+	}
+	if header.Metadata.ArtifactType != "" && header.Metadata.ArtifactType != artifactType {
+		return fmt.Errorf("artifact_payload_type_mismatch")
+	}
+	return nil
+}
+
+func expectedAssignmentArtifactKind(artifactType string) string {
+	switch strings.TrimSpace(artifactType) {
+	case "runtime_bundle":
+		return "RuntimeBundle"
+	case "context_route_pack":
+		return "ContextRoutePack"
+	case "conformance_expectation":
+		return "ConformanceExpectation"
+	case "adapter_assignment":
+		return "AdapterAssignment"
+	case "trust_bundle":
+		return "TrustBundle"
+	default:
+		return ""
+	}
 }
 
 func (s Server) createDevKLIQAssignment(w http.ResponseWriter, r *http.Request, principal authn.Principal) {
@@ -593,6 +761,65 @@ func (s Server) recordKLIQStatusReport(w http.ResponseWriter, r *http.Request, p
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "accepted"})
 }
 
+func (s Server) recordKLIQAuditUpload(w http.ResponseWriter, r *http.Request, principal authn.Principal) {
+	if s.Management == nil {
+		writeError(w, http.StatusInternalServerError, "kliq_management_store_not_configured")
+		return
+	}
+	var upload domain.KLIQAuditUpload
+	if err := json.NewDecoder(r.Body).Decode(&upload); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_json")
+		return
+	}
+	registration, err := s.Management.Registration(r.Context(), strings.TrimSpace(upload.KLIQID))
+	if errors.Is(err, management.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "kliq_registration_not_found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "registration_read_failed")
+		return
+	}
+	if err := ensureKLIQRegistrationActive(registration); err != nil {
+		writeError(w, http.StatusForbidden, "kliq_registration_revoked")
+		return
+	}
+	if err := validateKLIQScope(registration, upload.Environment, upload.Stage, upload.Scope); err != nil {
+		writeError(w, http.StatusBadRequest, "audit_scope_mismatch")
+		return
+	}
+	if err := authorizeKLIQServicePrincipal(principal, registration); err != nil {
+		writeError(w, http.StatusForbidden, "forbidden")
+		return
+	}
+	if strings.TrimSpace(upload.AuditRecordID) == "" || strings.TrimSpace(upload.PayloadSHA256) == "" {
+		writeError(w, http.StatusBadRequest, "invalid_audit_upload")
+		return
+	}
+	if upload.UploadedAt.IsZero() {
+		upload.UploadedAt = time.Now().UTC()
+	}
+	if err := s.Management.SaveAuditEvent(r.Context(), domain.ManagementAuditEvent{
+		EventType:   "kliq_audit_uploaded",
+		Actor:       principal.Subject,
+		TargetType:  "kliq_audit_event",
+		TargetID:    upload.AuditRecordID,
+		KLIQID:      upload.KLIQID,
+		Environment: upload.Environment,
+		Stage:       upload.Stage,
+		Scope:       upload.Scope,
+		Metadata: map[string]any{
+			"runtime_action_id": upload.RuntimeActionID,
+			"payload_sha256":    upload.PayloadSHA256,
+		},
+		CreatedAt: upload.UploadedAt,
+	}); err != nil {
+		writeError(w, http.StatusBadRequest, "audit_upload_store_failed")
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "accepted"})
+}
+
 func (s Server) getKLIQStatusReport(w http.ResponseWriter, r *http.Request, principal authn.Principal) {
 	if s.Management == nil {
 		writeError(w, http.StatusInternalServerError, "kliq_management_store_not_configured")
@@ -658,6 +885,31 @@ func validateAssignmentRequest(assignment domain.KLIQAssignment) error {
 		return errors.New("at least one artifact is required")
 	}
 	return nil
+}
+
+func validateIdentityMaterial(publicKeyPEM, csrPEM string) error {
+	if strings.TrimSpace(publicKeyPEM) != "" {
+		block, _ := pem.Decode([]byte(strings.TrimSpace(publicKeyPEM)))
+		if block == nil {
+			return errors.New("public key PEM is invalid")
+		}
+		if _, err := x509.ParsePKIXPublicKey(block.Bytes); err == nil {
+			return nil
+		}
+		if _, err := x509.ParsePKCS1PublicKey(block.Bytes); err == nil {
+			return nil
+		}
+		return errors.New("public key PEM is not a parseable public key")
+	}
+	block, _ := pem.Decode([]byte(strings.TrimSpace(csrPEM)))
+	if block == nil {
+		return errors.New("csr PEM is invalid")
+	}
+	csr, err := x509.ParseCertificateRequest(block.Bytes)
+	if err != nil {
+		return err
+	}
+	return csr.CheckSignature()
 }
 
 func kliqRegistrationScope(registration domain.KLIQRegistration) authn.Scope {

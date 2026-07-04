@@ -5,7 +5,11 @@ package api
 
 import (
 	"bytes"
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -13,10 +17,12 @@ import (
 
 	"github.com/kernloom/kernloom-core/internal/api/authn"
 	"github.com/kernloom/kernloom-core/internal/api/authz"
+	coreartifact "github.com/kernloom/kernloom-core/internal/core/artifact"
 	"github.com/kernloom/kernloom-core/internal/core/domain"
 	"github.com/kernloom/kernloom-core/internal/core/signing"
 	"github.com/kernloom/kernloom-core/internal/forge/jobs"
 	"github.com/kernloom/kernloom-core/internal/forge/management"
+	"github.com/kernloom/kernloom-core/internal/storage/artifactstore"
 )
 
 func TestCreateSimulationJobRequiresAuth(t *testing.T) {
@@ -88,12 +94,14 @@ func TestKLIQEnrollmentAssignmentHeartbeatAndStatusFlow(t *testing.T) {
 		t.Fatal(err)
 	}
 	serviceIssuer := &authn.KLIQServiceTokenIssuer{Secret: []byte("test-kliq-service-secret")}
+	artifacts := artifactstore.NewMemoryStore()
 	server := Server{
 		Authenticator:  authn.Chain{authn.DevTokenVerifier{}, serviceIssuer},
 		Authorizer:     authz.Authorizer{},
 		Store:          jobs.NewMemoryStore(),
 		Management:     store,
 		ManagementSign: signer,
+		Artifacts:      artifacts,
 		KLIQService:    serviceIssuer,
 	}
 	handler := server.Handler()
@@ -115,7 +123,7 @@ func TestKLIQEnrollmentAssignmentHeartbeatAndStatusFlow(t *testing.T) {
 	}
 
 	enrollResp := httptest.NewRecorder()
-	enrollBody := `{"enrollment_token":"` + token.SecretToken + `","node_id":"node-1","environment":"prod","stage":"prod","scope":"edge-prod","version":"test","trust_key_id":"forge-management-dev-local","public_key_pem":"-----BEGIN PUBLIC KEY-----test-----END PUBLIC KEY-----","adapter_inventory":["kernloom.adapter.klshield"],"capabilities":["klshield.runtime.source_mitigation"]}`
+	enrollBody := `{"enrollment_token":"` + token.SecretToken + `","node_id":"node-1","environment":"prod","stage":"prod","scope":"edge-prod","version":"test","trust_key_id":"forge-management-dev-local","public_key_pem":` + quoteJSON(validPublicKeyPEM(t)) + `,"adapter_inventory":["kernloom.adapter.klshield"],"capabilities":["klshield.runtime.source_mitigation"]}`
 	handler.ServeHTTP(enrollResp, httptest.NewRequest(http.MethodPost, "/v1/kliq/enroll", bytes.NewBufferString(enrollBody)))
 	if enrollResp.Code != http.StatusCreated {
 		t.Fatalf("expected enrollment created, got %d: %s", enrollResp.Code, enrollResp.Body.String())
@@ -132,7 +140,29 @@ func TestKLIQEnrollmentAssignmentHeartbeatAndStatusFlow(t *testing.T) {
 		t.Fatalf("expected service token and bound public key, got %#v", enrollment)
 	}
 
-	artifactEnvelope := json.RawMessage(`{"kind":"SignedEnvelope","payload":"runtime"}`)
+	runtimeEnvelope, err := signer.Sign(t.Context(), []byte(`{"kind":"RuntimeBundle","metadata":{"policy_id":"policy.test"}}`), signing.Metadata{
+		SourceCommit: "abc123",
+		PolicyID:     "policy.test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimePayload, err := json.Marshal(runtimeEnvelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, err := artifacts.Put(t.Context(), coreartifact.Artifact{
+		Metadata: coreartifact.Metadata{
+			ID:           "runtime_bundle.test",
+			PolicyID:     "policy.test",
+			ArtifactType: "runtime_bundle_signed_envelope",
+			SourceCommit: "abc123",
+		},
+		Payload: runtimePayload,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	plan := assignmentPlanRequest{
 		KLIQID:       registration.KLIQID,
 		SourceCommit: "abc123",
@@ -140,7 +170,8 @@ func TestKLIQEnrollmentAssignmentHeartbeatAndStatusFlow(t *testing.T) {
 		Artifacts: []domain.KLIQAssignedArtifact{{
 			ArtifactType: "runtime_bundle",
 			ArtifactID:   "runtime_bundle.test",
-			Envelope:     artifactEnvelope,
+			ArtifactRef:  ref.URI,
+			SHA256:       ref.SHA256,
 		}},
 	}
 	body, err := json.Marshal(plan)
@@ -193,6 +224,23 @@ func TestKLIQEnrollmentAssignmentHeartbeatAndStatusFlow(t *testing.T) {
 	if statusReadResp.Code != http.StatusOK {
 		t.Fatalf("expected status report read, got %d: %s", statusReadResp.Code, statusReadResp.Body.String())
 	}
+
+	events, err := store.AuditEvents(t.Context(), "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokenCreated := requireAuditEvent(t, events, "enrollment_token_created")
+	if tokenCreated.Actor != "ops" || tokenCreated.TargetID != token.Token.TokenID {
+		t.Fatalf("expected enrollment token creation actor and target, got %#v", tokenCreated)
+	}
+	enrolled := requireAuditEvent(t, events, "kliq_enrolled")
+	if enrolled.KLIQID != registration.KLIQID || enrolled.Metadata["enrollment_token_id"] != token.Token.TokenID || enrolled.Metadata["kliq_id"] != registration.KLIQID {
+		t.Fatalf("expected enrollment audit metadata to bind token and kliq id, got %#v", enrolled)
+	}
+	planned := requireAuditEvent(t, events, "assignment_planned")
+	if planned.Actor != "ops" || planned.KLIQID != registration.KLIQID {
+		t.Fatalf("expected assignment planning actor and target KLIQ, got %#v", planned)
+	}
 }
 
 func TestLatestAssignmentReadEnforcesRegisteredScope(t *testing.T) {
@@ -224,6 +272,83 @@ func TestLatestAssignmentReadEnforcesRegisteredScope(t *testing.T) {
 
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("expected forbidden for scope mismatch, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestProductionAssignmentPlannerRejectsRawArtifactEnvelope(t *testing.T) {
+	store := management.NewMemoryStore()
+	registration := testRegistration("kliq.raw-envelope", "node-raw")
+	if err := store.Register(t.Context(), registration); err != nil {
+		t.Fatal(err)
+	}
+	server := Server{
+		Authenticator:  authn.DevTokenVerifier{},
+		Authorizer:     authz.Authorizer{},
+		Store:          jobs.NewMemoryStore(),
+		Management:     store,
+		ManagementSign: testManagementSigner(t),
+		Artifacts:      artifactstore.NewMemoryStore(),
+	}
+	plan := assignmentPlanRequest{
+		KLIQID:       registration.KLIQID,
+		SourceCommit: "abc123",
+		ExpiresAt:    time.Now().Add(time.Hour).UTC(),
+		Artifacts: []domain.KLIQAssignedArtifact{{
+			ArtifactType: "runtime_bundle",
+			ArtifactID:   "runtime_bundle.raw",
+			Envelope:     json.RawMessage(`{"kind":"SignedEnvelope"}`),
+		}},
+	}
+	body, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/kliq/assignments", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer dev:ops:operator:acme:prod:prod")
+	rec := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected raw envelope assignment rejection, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestInvalidEnrollmentIdentityMaterialDoesNotConsumeToken(t *testing.T) {
+	store := management.NewMemoryStore()
+	server := Server{
+		Authenticator: authn.DevTokenVerifier{},
+		Authorizer:    authz.Authorizer{},
+		Store:         jobs.NewMemoryStore(),
+		Management:    store,
+	}
+	handler := server.Handler()
+	operatorToken := "Bearer dev:ops:operator:acme:prod:prod"
+
+	tokenResp := httptest.NewRecorder()
+	tokenReq := httptest.NewRequest(http.MethodPost, "/v1/kliq/enrollment-tokens", bytes.NewBufferString(`{"environment":"prod","stage":"prod","scope":"edge-prod"}`))
+	tokenReq.Header.Set("Authorization", operatorToken)
+	handler.ServeHTTP(tokenResp, tokenReq)
+	if tokenResp.Code != http.StatusCreated {
+		t.Fatalf("expected token created, got %d: %s", tokenResp.Code, tokenResp.Body.String())
+	}
+	var token enrollmentTokenResponse
+	if err := json.Unmarshal(tokenResp.Body.Bytes(), &token); err != nil {
+		t.Fatal(err)
+	}
+
+	invalidResp := httptest.NewRecorder()
+	invalidBody := `{"enrollment_token":"` + token.SecretToken + `","node_id":"node-invalid","environment":"prod","stage":"prod","scope":"edge-prod","public_key_pem":"not pem"}`
+	handler.ServeHTTP(invalidResp, httptest.NewRequest(http.MethodPost, "/v1/kliq/enroll", bytes.NewBufferString(invalidBody)))
+	if invalidResp.Code != http.StatusBadRequest {
+		t.Fatalf("expected invalid identity rejection, got %d: %s", invalidResp.Code, invalidResp.Body.String())
+	}
+
+	validResp := httptest.NewRecorder()
+	validBody := `{"enrollment_token":"` + token.SecretToken + `","node_id":"node-invalid","environment":"prod","stage":"prod","scope":"edge-prod","public_key_pem":` + quoteJSON(validPublicKeyPEM(t)) + `}`
+	handler.ServeHTTP(validResp, httptest.NewRequest(http.MethodPost, "/v1/kliq/enroll", bytes.NewBufferString(validBody)))
+	if validResp.Code != http.StatusCreated {
+		t.Fatalf("expected token still usable after invalid identity request, got %d: %s", validResp.Code, validResp.Body.String())
 	}
 }
 
@@ -300,6 +425,74 @@ func TestRevokedKLIQCannotFetchAssignment(t *testing.T) {
 	}
 }
 
+func TestRevokedKLIQCannotSendHealthyStatus(t *testing.T) {
+	store := management.NewMemoryStore()
+	registration := testRegistration("kliq.revoked-status", "node-revoked-status")
+	if err := store.Register(t.Context(), registration); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RevokeKLIQ(t.Context(), registration.KLIQID, "test revocation", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	issuer := &authn.KLIQServiceTokenIssuer{Secret: []byte("test-kliq-service-secret")}
+	token, err := issuer.Issue(registration.KLIQID, registration.Environment, registration.Stage, registration.Scope, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := Server{
+		Authenticator: authn.Chain{issuer},
+		Authorizer:    authz.Authorizer{},
+		Store:         jobs.NewMemoryStore(),
+		Management:    store,
+		KLIQService:   issuer,
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/kliq/status-reports", bytes.NewBufferString(`{"kliq_id":"`+registration.KLIQID+`","environment":"prod","stage":"prod","scope":"edge-prod","assignment_version":1,"status":"ok"}`))
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected forbidden for revoked KLIQ status, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestKLIQServiceCanRefreshOwnToken(t *testing.T) {
+	store := management.NewMemoryStore()
+	registration := testRegistration("kliq.refresh", "node-refresh")
+	if err := store.Register(t.Context(), registration); err != nil {
+		t.Fatal(err)
+	}
+	issuer := &authn.KLIQServiceTokenIssuer{Secret: []byte("test-kliq-service-secret")}
+	token, err := issuer.Issue(registration.KLIQID, registration.Environment, registration.Stage, registration.Scope, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := Server{
+		Authenticator: authn.Chain{issuer},
+		Authorizer:    authz.Authorizer{},
+		Store:         jobs.NewMemoryStore(),
+		Management:    store,
+		KLIQService:   issuer,
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/kliq/service-token/refresh", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected token refresh accepted, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var refreshed serviceTokenRefreshResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &refreshed); err != nil {
+		t.Fatal(err)
+	}
+	if refreshed.ServiceToken == "" || refreshed.ServiceToken == token {
+		t.Fatalf("expected new service token, got %#v", refreshed)
+	}
+}
+
 func TestHeartbeatAndStatusMustMatchRegistrationScope(t *testing.T) {
 	store := management.NewMemoryStore()
 	registration := domain.KLIQRegistration{
@@ -336,6 +529,45 @@ func TestHeartbeatAndStatusMustMatchRegistrationScope(t *testing.T) {
 	if statusResp.Code != http.StatusBadRequest {
 		t.Fatalf("expected status scope mismatch rejection, got %d: %s", statusResp.Code, statusResp.Body.String())
 	}
+
+	operatorRuntimeResp := httptest.NewRecorder()
+	operatorRuntimeReq := httptest.NewRequest(http.MethodPost, "/v1/kliq/heartbeat", bytes.NewBufferString(`{"kliq_id":"`+registration.KLIQID+`","environment":"prod","stage":"prod","scope":"edge-prod","assignment_version":1,"status":"ok"}`))
+	operatorRuntimeReq.Header.Set("Authorization", operatorToken)
+	handler.ServeHTTP(operatorRuntimeResp, operatorRuntimeReq)
+	if operatorRuntimeResp.Code != http.StatusForbidden {
+		t.Fatalf("expected operator token rejected as KLIQ runtime credential, got %d: %s", operatorRuntimeResp.Code, operatorRuntimeResp.Body.String())
+	}
+}
+
+func TestManagementRevocationAuditIncludesActorAndTarget(t *testing.T) {
+	store := management.NewMemoryStore()
+	registration := testRegistration("kliq.audit-revoked", "node-audit-revoked")
+	if err := store.Register(t.Context(), registration); err != nil {
+		t.Fatal(err)
+	}
+	server := Server{
+		Authenticator: authn.DevTokenVerifier{},
+		Authorizer:    authz.Authorizer{},
+		Store:         jobs.NewMemoryStore(),
+		Management:    store,
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/kliq/registrations/"+registration.KLIQID+"/revoke", bytes.NewBufferString(`{"reason":"audit test"}`))
+	req.Header.Set("Authorization", "Bearer dev:ops:operator:acme:prod:prod")
+	rec := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected revocation accepted, got %d: %s", rec.Code, rec.Body.String())
+	}
+	events, err := store.AuditEvents(t.Context(), "kliq_registration", registration.KLIQID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	revocation := requireAuditEvent(t, events, "revocation")
+	if revocation.Actor != "ops" || revocation.KLIQID != registration.KLIQID || revocation.TargetID != registration.KLIQID {
+		t.Fatalf("expected revocation actor and target, got %#v", revocation)
+	}
 }
 
 func testRegistration(kliqID, nodeID string) domain.KLIQRegistration {
@@ -370,4 +602,33 @@ func testManagementSigner(t *testing.T) *signing.DevLocalSigner {
 		t.Fatal(err)
 	}
 	return signer
+}
+
+func validPublicKeyPEM(t *testing.T) string {
+	t.Helper()
+	publicKey, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := x509.MarshalPKIXPublicKey(publicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: data}))
+}
+
+func quoteJSON(value string) string {
+	data, _ := json.Marshal(value)
+	return string(data)
+}
+
+func requireAuditEvent(t *testing.T, events []domain.ManagementAuditEvent, eventType string) domain.ManagementAuditEvent {
+	t.Helper()
+	for _, event := range events {
+		if event.EventType == eventType {
+			return event
+		}
+	}
+	t.Fatalf("expected audit event %q in %#v", eventType, events)
+	return domain.ManagementAuditEvent{}
 }

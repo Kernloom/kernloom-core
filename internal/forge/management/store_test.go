@@ -143,3 +143,67 @@ func TestMemoryStoreRejectsOlderAssignmentVersion(t *testing.T) {
 		t.Fatal("expected older assignment version to be rejected")
 	}
 }
+
+func TestMemoryStoreDoesNotReactivateRevokedTrustBundle(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := context.Background()
+	now := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+	bundle := domain.TrustBundle{
+		KeyID:     "forge-management-dev-local",
+		PublicKey: "public-key",
+		Purpose:   "kliq_assignment",
+		Status:    "active",
+		ExpiresAt: now.Add(time.Hour),
+		Issuer:    "test",
+	}
+	if err := store.SaveTrustBundle(ctx, bundle); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RevokeTrustBundle(ctx, bundle.KeyID, "rotation", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveTrustBundle(ctx, bundle); err == nil {
+		t.Fatal("expected active overwrite of revoked trust bundle to be rejected")
+	}
+}
+
+func TestMemoryStoreLatestAssignmentDoesNotFallbackAfterLatestRevoked(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := context.Background()
+	if err := store.SaveAssignment(ctx, "kliq.test", 1, signing.SignedEnvelope{PayloadSHA256: "sha256:v1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveAssignment(ctx, "kliq.test", 2, signing.SignedEnvelope{PayloadSHA256: "sha256:v2"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RevokeAssignment(ctx, "kliq.test", 2, "bad assignment", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.LatestAssignment(ctx, "kliq.test"); err == nil {
+		t.Fatal("expected revoked latest assignment to suppress older fallback")
+	}
+}
+
+func TestMemoryStoreAuditEventsIncludeActorFromContext(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := WithAuditActor(context.Background(), "ops")
+	now := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+	token := domain.KLIQEnrollmentToken{
+		TokenID:     "token.actor",
+		Environment: "prod",
+		Stage:       "prod",
+		Scope:       "edge-prod",
+		ExpiresAt:   now.Add(time.Hour),
+		CreatedAt:   now,
+	}
+	if err := store.CreateEnrollmentToken(ctx, token, "secret"); err != nil {
+		t.Fatal(err)
+	}
+	events, err := store.AuditEvents(context.Background(), "kliq_enrollment_token", token.TokenID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].Actor != "ops" {
+		t.Fatalf("expected audit actor ops, got %#v", events)
+	}
+}

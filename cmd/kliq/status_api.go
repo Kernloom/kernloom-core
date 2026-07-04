@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	"github.com/kernloom/kernloom-core/internal/kliq/actionstate"
+	kliqruntime "github.com/kernloom/kernloom-core/internal/kliq/runtime"
 )
 
 func serveStatusAPI(args []string) {
@@ -43,7 +44,11 @@ func serveStatusAPI(args []string) {
 	}
 }
 
-func statusAPIHandler(store actionstate.Store, statePath string) http.Handler {
+func statusAPIHandler(store actionstate.Store, statePath string, registries ...kliqruntime.AdapterRuntimeRegistry) http.Handler {
+	var registry kliqruntime.AdapterRuntimeRegistry
+	if len(registries) > 0 {
+		registry = registries[0]
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeAPIJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -56,7 +61,7 @@ func statusAPIHandler(store actionstate.Store, statePath string) http.Handler {
 		writeAPIJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 	})
 	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
-		snapshot, err := buildStatusSnapshot(r.Context(), store, statePath, nil)
+		snapshot, err := buildStatusSnapshot(r.Context(), store, statePath, registry)
 		if err != nil {
 			writeAPIError(w, http.StatusInternalServerError, err)
 			return
@@ -77,7 +82,7 @@ func statusAPIHandler(store actionstate.Store, statePath string) http.Handler {
 			writeAPIError(w, http.StatusInternalServerError, err)
 			return
 		}
-		writeAPIJSON(w, http.StatusOK, adapterStatusViews(leases, nil))
+		writeAPIJSON(w, http.StatusOK, adapterStatusViews(leases, registry))
 	})
 	mux.HandleFunc("/runtime/actions", func(w http.ResponseWriter, r *http.Request) {
 		leases, err := store.AllLeases(r.Context())
@@ -114,7 +119,7 @@ func statusAPIHandler(store actionstate.Store, statePath string) http.Handler {
 		writeAPIJSON(w, http.StatusOK, auditRecordViews(records))
 	})
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
-		snapshot, err := buildStatusSnapshot(r.Context(), store, statePath, nil)
+		snapshot, err := buildStatusSnapshot(r.Context(), store, statePath, registry)
 		if err != nil {
 			writeAPIError(w, http.StatusInternalServerError, err)
 			return

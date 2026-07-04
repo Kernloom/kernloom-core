@@ -190,7 +190,7 @@ func (s *PostgresStore) CreateEnrollmentToken(ctx context.Context, token domain.
 	if err != nil {
 		return err
 	}
-	return s.SaveAuditEvent(ctx, auditEvent("enrollment_token_created", "kliq_enrollment_token", token.TokenID, "", token.Environment, token.Stage, token.Scope, token.CreatedAt, nil))
+	return s.SaveAuditEvent(ctx, auditEvent(ctx, "enrollment_token_created", "kliq_enrollment_token", token.TokenID, "", token.Environment, token.Stage, token.Scope, token.CreatedAt, nil))
 }
 
 func (s *PostgresStore) EnrollmentToken(ctx context.Context, tokenID string) (domain.KLIQEnrollmentToken, error) {
@@ -254,7 +254,7 @@ func (s *PostgresStore) UseEnrollmentToken(ctx context.Context, secret, environm
 	if err := tx.Commit(); err != nil {
 		return domain.KLIQEnrollmentToken{}, err
 	}
-	return token, s.SaveAuditEvent(ctx, auditEvent("enrollment_token_used", "kliq_enrollment_token", token.TokenID, "", token.Environment, token.Stage, token.Scope, token.UsedAt, nil))
+	return token, s.SaveAuditEvent(ctx, auditEvent(ctx, "enrollment_token_used", "kliq_enrollment_token", token.TokenID, "", token.Environment, token.Stage, token.Scope, token.UsedAt, nil))
 }
 
 func (s *PostgresStore) RevokeEnrollmentToken(ctx context.Context, tokenID, reason string, revokedAt time.Time) error {
@@ -322,10 +322,10 @@ func (s *PostgresStore) Register(ctx context.Context, registration domain.KLIQRe
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	if err := s.SaveAuditEvent(ctx, auditEvent("kliq_enrolled", "kliq_registration", registration.RegistrationID, registration.KLIQID, registration.Environment, registration.Stage, registration.Scope, registration.RegisteredAt, nil)); err != nil {
+	if err := s.SaveAuditEvent(ctx, auditEvent(ctx, "kliq_enrolled", "kliq_registration", registration.RegistrationID, registration.KLIQID, registration.Environment, registration.Stage, registration.Scope, registration.RegisteredAt, map[string]any{"kliq_id": registration.KLIQID})); err != nil {
 		return err
 	}
-	return s.SaveAuditEvent(ctx, auditEvent("identity_issued", "kliq_identity", registration.Identity.IdentityID, registration.KLIQID, registration.Environment, registration.Stage, registration.Scope, registration.Identity.IssuedAt, nil))
+	return s.SaveAuditEvent(ctx, auditEvent(ctx, "identity_issued", "kliq_identity", registration.Identity.IdentityID, registration.KLIQID, registration.Environment, registration.Stage, registration.Scope, registration.Identity.IssuedAt, map[string]any{"kliq_id": registration.KLIQID}))
 }
 
 func (s *PostgresStore) Registration(ctx context.Context, kliqID string) (domain.KLIQRegistration, error) {
@@ -395,6 +395,13 @@ func (s *PostgresStore) RevokeKLIQ(ctx context.Context, kliqID, reason string, r
 func (s *PostgresStore) SaveTrustBundle(ctx context.Context, bundle domain.TrustBundle) error {
 	if bundle.KeyID == "" {
 		return fmt.Errorf("trust bundle requires key_id")
+	}
+	existing, err := s.TrustBundle(ctx, bundle.KeyID)
+	if err == nil && existing.Status == "revoked" && bundle.Status == "active" {
+		return fmt.Errorf("trust bundle %q is revoked and cannot be reactivated", bundle.KeyID)
+	}
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		return err
 	}
 	data, err := json.Marshal(bundle)
 	if err != nil {
@@ -506,24 +513,28 @@ func (s *PostgresStore) SaveAssignment(ctx context.Context, kliqID string, versi
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	return s.SaveAuditEvent(ctx, auditEvent("assignment_published", "kliq_assignment", fmt.Sprintf("%s:%d", kliqID, version), kliqID, assignment.Environment, assignment.Stage, assignment.Scope, time.Now().UTC(), map[string]any{"digest": assignmentDigest(envelope)}))
+	return s.SaveAuditEvent(ctx, auditEvent(ctx, "assignment_published", "kliq_assignment", fmt.Sprintf("%s:%d", kliqID, version), kliqID, assignment.Environment, assignment.Stage, assignment.Scope, time.Now().UTC(), map[string]any{"digest": assignmentDigest(envelope)}))
 }
 
 func (s *PostgresStore) LatestAssignment(ctx context.Context, kliqID string) (signing.SignedEnvelope, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT envelope_json FROM kliq_assignments
-		WHERE kliq_id = $1 AND revoked_at IS NULL
+	row := s.db.QueryRowContext(ctx, `SELECT envelope_json, revoked_at FROM kliq_assignments
+		WHERE kliq_id = $1
 		ORDER BY assignment_version DESC LIMIT 1`, kliqID)
 	var data []byte
-	if err := row.Scan(&data); errors.Is(err, sql.ErrNoRows) {
+	var revokedAt sql.NullTime
+	if err := row.Scan(&data, &revokedAt); errors.Is(err, sql.ErrNoRows) {
 		return signing.SignedEnvelope{}, ErrNotFound
 	} else if err != nil {
 		return signing.SignedEnvelope{}, err
+	}
+	if revokedAt.Valid {
+		return signing.SignedEnvelope{}, ErrNotFound
 	}
 	var envelope signing.SignedEnvelope
 	if err := json.Unmarshal(data, &envelope); err != nil {
 		return signing.SignedEnvelope{}, err
 	}
-	return envelope, s.SaveAuditEvent(ctx, auditEvent("assignment_pulled", "kliq_assignment", fmt.Sprintf("%s:%s", kliqID, envelope.PayloadSHA256), kliqID, "", "", "", time.Now().UTC(), map[string]any{"digest": assignmentDigest(envelope)}))
+	return envelope, s.SaveAuditEvent(ctx, auditEvent(ctx, "assignment_pulled", "kliq_assignment", fmt.Sprintf("%s:%s", kliqID, envelope.PayloadSHA256), kliqID, "", "", "", time.Now().UTC(), map[string]any{"digest": assignmentDigest(envelope)}))
 }
 
 func (s *PostgresStore) RevokeAssignment(ctx context.Context, kliqID string, version int64, reason string, revokedAt time.Time) error {
@@ -598,6 +609,9 @@ func (s *PostgresStore) SaveAuditEvent(ctx context.Context, event domain.Managem
 	if event.CreatedAt.IsZero() {
 		event.CreatedAt = time.Now().UTC()
 	}
+	if event.Actor == "" {
+		event.Actor = auditActor(ctx)
+	}
 	data, err := json.Marshal(event)
 	if err != nil {
 		return err
@@ -652,6 +666,7 @@ func (s *PostgresStore) saveRevocation(ctx context.Context, targetType, targetID
 		TargetID:     targetID,
 		Reason:       reason,
 		CreatedAt:    revokedAt.UTC(),
+		CreatedBy:    auditActor(ctx),
 	}
 	data, err := json.Marshal(revocation)
 	if err != nil {
@@ -664,19 +679,20 @@ func (s *PostgresStore) saveRevocation(ctx context.Context, targetType, targetID
 		revocation.RevocationID, targetType, targetID, reason, revocation.CreatedAt, revocation.CreatedBy, data); err != nil {
 		return err
 	}
-	return s.SaveAuditEvent(ctx, auditEvent("revocation", targetType, targetID, kliqID, "", "", "", revokedAt, map[string]any{"reason": reason}))
+	return s.SaveAuditEvent(ctx, auditEvent(ctx, "revocation", targetType, targetID, kliqID, "", "", "", revokedAt, map[string]any{"reason": reason}))
 }
 
-func auditEvent(eventType, targetType, targetID, kliqID, environment, stage, scope string, createdAt time.Time, metadata map[string]any) domain.ManagementAuditEvent {
+func auditEvent(ctx context.Context, eventType, targetType, targetID, kliqID, environment, stage, scope string, createdAt time.Time, metadata map[string]any) domain.ManagementAuditEvent {
 	return domain.ManagementAuditEvent{
 		EventType:   eventType,
+		Actor:       auditActor(ctx),
 		TargetType:  targetType,
 		TargetID:    targetID,
 		KLIQID:      kliqID,
 		Environment: environment,
 		Stage:       stage,
 		Scope:       scope,
-		Metadata:    metadata,
+		Metadata:    auditMetadata(ctx, metadata),
 		CreatedAt:   createdAt,
 	}
 }

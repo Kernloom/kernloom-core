@@ -70,6 +70,16 @@ type DevLocalSigner struct {
 	Now        func() time.Time
 }
 
+func NewEd25519Verifier(keyID string, publicKey []byte) (*DevLocalSigner, error) {
+	if keyID == "" {
+		return nil, fmt.Errorf("Ed25519 verifier requires key id")
+	}
+	if len(publicKey) != ed25519.PublicKeySize {
+		return nil, fmt.Errorf("invalid Ed25519 public key")
+	}
+	return &DevLocalSigner{KeyID: keyID, PublicKey: ed25519.PublicKey(publicKey)}, nil
+}
+
 func NewDevLocalSigner(keyID string) (*DevLocalSigner, error) {
 	if keyID == "" {
 		return nil, fmt.Errorf("dev-local signer requires key id")

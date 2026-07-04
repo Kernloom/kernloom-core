@@ -44,6 +44,10 @@ type ManagedAssignmentActivation struct {
 	ExpiresAt         time.Time
 }
 
+func (s *ManagedAssignmentSource) AssignmentArtifacts() []domain.KLIQAssignedArtifact {
+	return append([]domain.KLIQAssignedArtifact(nil), s.assignment.Artifacts...)
+}
+
 func (s *ManagedAssignmentSource) SetActiveAssignment(version int64, digest string) {
 	s.ActiveAssignmentVersion = version
 	s.ActiveAssignmentDigest = digest
@@ -134,6 +138,9 @@ func (s *ManagedAssignmentSource) verifyAssignment(ctx context.Context, envelope
 	if err := domain.ValidateAssignedArtifactDigests(assignment); err != nil {
 		return domain.KLIQAssignment{}, err
 	}
+	if err := s.verifyAssignedArtifacts(ctx, assignment); err != nil {
+		return domain.KLIQAssignment{}, err
+	}
 	if err := domain.ValidateKLIQAssignmentActivation(assignment, domain.KLIQAssignmentActivationContext{
 		KLIQID:                  s.KLIQID,
 		Environment:             s.Environment,
@@ -148,6 +155,76 @@ func (s *ManagedAssignmentSource) verifyAssignment(ctx context.Context, envelope
 		return domain.KLIQAssignment{}, err
 	}
 	return assignment, nil
+}
+
+func (s *ManagedAssignmentSource) verifyAssignedArtifacts(ctx context.Context, assignment domain.KLIQAssignment) error {
+	for _, artifact := range assignment.Artifacts {
+		if !domain.SupportedAssignmentArtifactType(artifact.ArtifactType) {
+			return fmt.Errorf("assignment %q contains unsupported artifact type %q", assignment.AssignmentID, artifact.ArtifactType)
+		}
+		var envelope signing.SignedEnvelope
+		if err := json.Unmarshal(artifact.Envelope, &envelope); err != nil {
+			return fmt.Errorf("assignment %q artifact %q is not a signed envelope: %w", assignment.AssignmentID, artifact.ArtifactID, err)
+		}
+		if envelope.Kind != "SignedEnvelope" {
+			return fmt.Errorf("assignment %q artifact %q is not a signed envelope", assignment.AssignmentID, artifact.ArtifactID)
+		}
+		result, err := s.Verifier.Verify(ctx, envelope)
+		if err != nil {
+			return err
+		}
+		if !result.Valid {
+			return fmt.Errorf("assignment %q artifact %q signature invalid: %s", assignment.AssignmentID, artifact.ArtifactID, result.Error)
+		}
+		if envelope.SourceCommit != "" && assignment.SourceCommit != "" && envelope.SourceCommit != assignment.SourceCommit {
+			return fmt.Errorf("assignment %q artifact %q source_commit mismatch", assignment.AssignmentID, artifact.ArtifactID)
+		}
+		if err := validateAssignedArtifactPayloadType(artifact.ArtifactType, envelope.Payload); err != nil {
+			return fmt.Errorf("assignment %q artifact %q invalid payload: %w", assignment.AssignmentID, artifact.ArtifactID, err)
+		}
+	}
+	return nil
+}
+
+func validateAssignedArtifactPayloadType(artifactType string, payload []byte) error {
+	var header struct {
+		Kind     string `json:"kind"`
+		Metadata struct {
+			ArtifactType string `json:"artifact_type"`
+		} `json:"metadata"`
+	}
+	if err := json.Unmarshal(payload, &header); err != nil {
+		return err
+	}
+	expectedKind := expectedArtifactKind(artifactType)
+	if expectedKind != "" && header.Kind != expectedKind {
+		return fmt.Errorf("kind %q does not match artifact type %q", header.Kind, artifactType)
+	}
+	if header.Metadata.ArtifactType != "" && header.Metadata.ArtifactType != artifactType {
+		return fmt.Errorf("metadata artifact_type %q does not match %q", header.Metadata.ArtifactType, artifactType)
+	}
+	return nil
+}
+
+func expectedArtifactKind(artifactType string) string {
+	switch artifactType {
+	case "runtime_bundle":
+		return "RuntimeBundle"
+	case "context_route_pack":
+		return "ContextRoutePack"
+	case "conformance_expectation":
+		return "ConformanceExpectation"
+	case "adapter_assignment":
+		return "AdapterAssignment"
+	case "trust_bundle":
+		return "TrustBundle"
+	case "management_profile":
+		return ""
+	case "fallback_profile":
+		return ""
+	default:
+		return ""
+	}
 }
 
 func (s *ManagedAssignmentSource) validateTrustBundle(assignment domain.KLIQAssignment, result signing.VerificationResult) error {

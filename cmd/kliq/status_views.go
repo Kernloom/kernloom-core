@@ -17,12 +17,24 @@ import (
 type statusSnapshot struct {
 	GeneratedAt       string              `json:"generated_at"`
 	StatePath         string              `json:"state_path"`
+	Assignment        *assignmentView     `json:"assignment,omitempty"`
 	Bundle            *bundleStatusView   `json:"bundle,omitempty"`
 	RuntimeActions    []runtimeActionView `json:"runtime_actions"`
 	RuntimeCounts     map[string]int      `json:"runtime_counts"`
 	PendingAuditCount int                 `json:"pending_audit_count"`
 	Adapters          []adapterStatusView `json:"adapters"`
 	Findings          []string            `json:"findings,omitempty"`
+}
+
+type assignmentView struct {
+	KLIQID          string `json:"kliq_id"`
+	AssignmentID    string `json:"assignment_id"`
+	Version         int64  `json:"version"`
+	SourceCommit    string `json:"source_commit"`
+	Digest          string `json:"digest"`
+	ExpiresAt       string `json:"expires_at"`
+	ActivatedAt     string `json:"activated_at"`
+	CredentialState string `json:"credential_state,omitempty"`
 }
 
 type bundleStatusView struct {
@@ -107,6 +119,20 @@ func buildStatusSnapshot(ctx context.Context, store actionstate.Store, statePath
 		PendingAuditCount: len(audits),
 		Adapters:          adapterStatusViews(leases, registry),
 	}
+	if credential, err := store.KLIQCredential(ctx); err == nil {
+		if state, err := store.KLIQManagementState(ctx, credential.KLIQID); err == nil {
+			snapshot.Assignment = &assignmentView{
+				KLIQID:          state.KLIQID,
+				AssignmentID:    state.ActiveAssignmentID,
+				Version:         state.ActiveAssignmentVersion,
+				SourceCommit:    redactID(state.ActiveAssignmentSourceCommit),
+				Digest:          state.ActiveAssignmentDigest,
+				ExpiresAt:       formatStatusTime(state.ActiveAssignmentExpiresAt),
+				ActivatedAt:     formatStatusTime(state.ActiveAssignmentActivatedAt),
+				CredentialState: credentialStatus(credential),
+			}
+		}
+	}
 	if bundleErr == nil {
 		view := bundleStatus(bundle)
 		snapshot.Bundle = &view
@@ -114,6 +140,16 @@ func buildStatusSnapshot(ctx context.Context, store actionstate.Store, statePath
 		snapshot.Findings = append(snapshot.Findings, "bundle unavailable")
 	}
 	return snapshot, nil
+}
+
+func credentialStatus(credential actionstate.KLIQCredential) string {
+	if credential.ServiceTokenExpiresAt.IsZero() {
+		return "unknown"
+	}
+	if time.Now().UTC().Before(credential.ServiceTokenExpiresAt.UTC()) {
+		return "valid"
+	}
+	return "expired"
 }
 
 func bundleStatus(record actionstate.BundleRecord) bundleStatusView {

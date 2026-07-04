@@ -105,7 +105,7 @@ manual assignment JSON is no longer a production endpoint.
 ```sh
 curl -sS -H "Authorization: Bearer ${OPERATOR_TOKEN}" \
   -H 'Content-Type: application/json' \
-  -d '{"kliq_id":"<kliq_id>","source_commit":"<source_commit>","expires_at":"2026-07-03T23:59:59Z","artifacts":[{"artifact_type":"runtime_bundle","artifact_id":"runtime_bundle.manual","envelope":<signed-runtime-bundle-json>}]} ' \
+  -d '{"kliq_id":"<kliq_id>","source_commit":"<source_commit>","expires_at":"2026-07-03T23:59:59Z","artifacts":[{"artifact_type":"runtime_bundle","artifact_id":"runtime_bundle.manual","artifact_ref":"fs:///var/lib/kernloom/artifacts/.../runtime_bundle.signed.json","sha256":"sha256:<signed-artifact-digest>"}]}' \
   http://127.0.0.1:8080/v1/kliq/assignments
 ```
 
@@ -122,7 +122,7 @@ before activation:
   --stage prod \
   --scope edge-prod \
   --trust-key-id forge-management-dev-local \
-  --key ./var/kernloom/forge/management.ed25519.json \
+  --trust-bundle /etc/kernloom/trust/forge-management.public.json \
   --state /tmp/kernloom-kliq-runtime/state.db
 ```
 
@@ -137,7 +137,8 @@ make build
 
 ./bin/kliq load-bundle \
   --bundle ../enterprise-kernloom-policies/generated/signed/runtime.mitigate-abnormal-source-behavior.runtime_bundle.signed.json \
-  --key ../enterprise-kernloom-policies/generated/keys/dev-local.ed25519.json \
+  --trust-bundle ../enterprise-kernloom-policies/generated/keys/dev-local.ed25519.json \
+  --dev-allow-private-trust-key \
   --state /tmp/kernloom-kliq-runtime/state.db
 ```
 
@@ -166,7 +167,8 @@ Then execute an IPv4 source action through KLIQ:
 ```sh
 cd ../kernloom-core
 ./bin/kliq execute-action \
-  --key ../enterprise-kernloom-policies/generated/keys/dev-local.ed25519.json \
+  --trust-bundle ../enterprise-kernloom-policies/generated/keys/dev-local.ed25519.json \
+  --dev-allow-private-trust-key \
   --state /tmp/kernloom-kliq-runtime/state.db \
   --adapter-id kernloom.adapter.klshield \
   --adapter-addr 127.0.0.1:18082 \
@@ -181,7 +183,8 @@ cd ../kernloom-core
   --audit-id audit.slice5_6.local
 
 ./bin/kliq reconcile \
-  --key ../enterprise-kernloom-policies/generated/keys/dev-local.ed25519.json \
+  --trust-bundle ../enterprise-kernloom-policies/generated/keys/dev-local.ed25519.json \
+  --dev-allow-private-trust-key \
   --state /tmp/kernloom-kliq-runtime/state.db \
   --adapter-id kernloom.adapter.klshield \
   --adapter-addr 127.0.0.1:18082

@@ -20,6 +20,45 @@ import (
 
 var ErrNotFound = errors.New("kliq management record not found")
 
+type auditActorContextKey struct{}
+type auditMetadataContextKey struct{}
+
+func WithAuditActor(ctx context.Context, actor string) context.Context {
+	if actor == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, auditActorContextKey{}, actor)
+}
+
+func auditActor(ctx context.Context) string {
+	if actor, ok := ctx.Value(auditActorContextKey{}).(string); ok {
+		return actor
+	}
+	return ""
+}
+
+func WithAuditMetadata(ctx context.Context, metadata map[string]any) context.Context {
+	if len(metadata) == 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, auditMetadataContextKey{}, metadata)
+}
+
+func auditMetadata(ctx context.Context, extra map[string]any) map[string]any {
+	base, _ := ctx.Value(auditMetadataContextKey{}).(map[string]any)
+	if len(base) == 0 && len(extra) == 0 {
+		return nil
+	}
+	merged := map[string]any{}
+	for key, value := range base {
+		merged[key] = value
+	}
+	for key, value := range extra {
+		merged[key] = value
+	}
+	return merged
+}
+
 type Store interface {
 	CreateEnrollmentToken(ctx context.Context, token domain.KLIQEnrollmentToken, secret string) error
 	EnrollmentToken(ctx context.Context, tokenID string) (domain.KLIQEnrollmentToken, error)
@@ -91,7 +130,7 @@ func TokenSHA256(secret string) string {
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
-func (s *MemoryStore) CreateEnrollmentToken(_ context.Context, token domain.KLIQEnrollmentToken, secret string) error {
+func (s *MemoryStore) CreateEnrollmentToken(ctx context.Context, token domain.KLIQEnrollmentToken, secret string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if token.TokenID == "" || secret == "" {
@@ -105,6 +144,7 @@ func (s *MemoryStore) CreateEnrollmentToken(_ context.Context, token domain.KLIQ
 	s.tokensByID[token.TokenID] = token
 	s.appendAuditLocked(domain.ManagementAuditEvent{
 		EventType:   "enrollment_token_created",
+		Actor:       auditActor(ctx),
 		TargetType:  "kliq_enrollment_token",
 		TargetID:    token.TokenID,
 		Environment: token.Environment,
@@ -125,7 +165,7 @@ func (s *MemoryStore) EnrollmentToken(_ context.Context, tokenID string) (domain
 	return token, nil
 }
 
-func (s *MemoryStore) UseEnrollmentToken(_ context.Context, secret, environment, stage, scope string, usedAt time.Time) (domain.KLIQEnrollmentToken, error) {
+func (s *MemoryStore) UseEnrollmentToken(ctx context.Context, secret, environment, stage, scope string, usedAt time.Time) (domain.KLIQEnrollmentToken, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	token, ok := s.tokensByHash[TokenSHA256(secret)]
@@ -155,6 +195,7 @@ func (s *MemoryStore) UseEnrollmentToken(_ context.Context, secret, environment,
 	s.tokensByID[token.TokenID] = token
 	s.appendAuditLocked(domain.ManagementAuditEvent{
 		EventType:   "enrollment_token_used",
+		Actor:       auditActor(ctx),
 		TargetType:  "kliq_enrollment_token",
 		TargetID:    token.TokenID,
 		Environment: token.Environment,
@@ -165,7 +206,7 @@ func (s *MemoryStore) UseEnrollmentToken(_ context.Context, secret, environment,
 	return token, nil
 }
 
-func (s *MemoryStore) RevokeEnrollmentToken(_ context.Context, tokenID, reason string, revokedAt time.Time) error {
+func (s *MemoryStore) RevokeEnrollmentToken(ctx context.Context, tokenID, reason string, revokedAt time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	token, ok := s.tokensByID[tokenID]
@@ -182,9 +223,11 @@ func (s *MemoryStore) RevokeEnrollmentToken(_ context.Context, tokenID, reason s
 		TargetID:     tokenID,
 		Reason:       reason,
 		CreatedAt:    revokedAt.UTC(),
+		CreatedBy:    auditActor(ctx),
 	}
 	s.appendAuditLocked(domain.ManagementAuditEvent{
 		EventType:  "revocation",
+		Actor:      auditActor(ctx),
 		TargetType: "kliq_enrollment_token",
 		TargetID:   tokenID,
 		Metadata:   map[string]any{"reason": reason},
@@ -193,7 +236,7 @@ func (s *MemoryStore) RevokeEnrollmentToken(_ context.Context, tokenID, reason s
 	return nil
 }
 
-func (s *MemoryStore) Register(_ context.Context, registration domain.KLIQRegistration) error {
+func (s *MemoryStore) Register(ctx context.Context, registration domain.KLIQRegistration) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if registration.KLIQID == "" {
@@ -215,22 +258,26 @@ func (s *MemoryStore) Register(_ context.Context, registration domain.KLIQRegist
 	s.identities[registration.KLIQID] = registration.Identity
 	s.appendAuditLocked(domain.ManagementAuditEvent{
 		EventType:   "kliq_enrolled",
+		Actor:       auditActor(ctx),
 		TargetType:  "kliq_registration",
 		TargetID:    registration.RegistrationID,
 		KLIQID:      registration.KLIQID,
 		Environment: registration.Environment,
 		Stage:       registration.Stage,
 		Scope:       registration.Scope,
+		Metadata:    auditMetadata(ctx, map[string]any{"kliq_id": registration.KLIQID}),
 		CreatedAt:   registration.RegisteredAt,
 	})
 	s.appendAuditLocked(domain.ManagementAuditEvent{
 		EventType:   "identity_issued",
+		Actor:       auditActor(ctx),
 		TargetType:  "kliq_identity",
 		TargetID:    registration.Identity.IdentityID,
 		KLIQID:      registration.KLIQID,
 		Environment: registration.Environment,
 		Stage:       registration.Stage,
 		Scope:       registration.Scope,
+		Metadata:    auditMetadata(ctx, map[string]any{"kliq_id": registration.KLIQID}),
 		CreatedAt:   registration.Identity.IssuedAt,
 	})
 	return nil
@@ -256,7 +303,7 @@ func (s *MemoryStore) Identity(_ context.Context, kliqID string) (domain.KLIQIde
 	return identity, nil
 }
 
-func (s *MemoryStore) RevokeKLIQ(_ context.Context, kliqID, reason string, revokedAt time.Time) error {
+func (s *MemoryStore) RevokeKLIQ(ctx context.Context, kliqID, reason string, revokedAt time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	registration, ok := s.registrations[kliqID]
@@ -278,9 +325,11 @@ func (s *MemoryStore) RevokeKLIQ(_ context.Context, kliqID, reason string, revok
 		TargetID:     kliqID,
 		Reason:       reason,
 		CreatedAt:    revokedAt.UTC(),
+		CreatedBy:    auditActor(ctx),
 	}
 	s.appendAuditLocked(domain.ManagementAuditEvent{
 		EventType:  "revocation",
+		Actor:      auditActor(ctx),
 		TargetType: "kliq_registration",
 		TargetID:   kliqID,
 		KLIQID:     kliqID,
@@ -296,6 +345,9 @@ func (s *MemoryStore) SaveTrustBundle(_ context.Context, bundle domain.TrustBund
 	if bundle.KeyID == "" {
 		return fmt.Errorf("trust bundle requires key_id")
 	}
+	if existing, ok := s.trustBundles[bundle.KeyID]; ok && existing.Status == "revoked" && bundle.Status == "active" {
+		return fmt.Errorf("trust bundle %q is revoked and cannot be reactivated", bundle.KeyID)
+	}
 	s.trustBundles[bundle.KeyID] = bundle
 	return nil
 }
@@ -310,7 +362,7 @@ func (s *MemoryStore) TrustBundle(_ context.Context, keyID string) (domain.Trust
 	return bundle, nil
 }
 
-func (s *MemoryStore) RevokeTrustBundle(_ context.Context, keyID, reason string, revokedAt time.Time) error {
+func (s *MemoryStore) RevokeTrustBundle(ctx context.Context, keyID, reason string, revokedAt time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	bundle, ok := s.trustBundles[keyID]
@@ -325,9 +377,11 @@ func (s *MemoryStore) RevokeTrustBundle(_ context.Context, keyID, reason string,
 		TargetID:     keyID,
 		Reason:       reason,
 		CreatedAt:    revokedAt.UTC(),
+		CreatedBy:    auditActor(ctx),
 	}
 	s.appendAuditLocked(domain.ManagementAuditEvent{
 		EventType:  "revocation",
+		Actor:      auditActor(ctx),
 		TargetType: "trust_key",
 		TargetID:   keyID,
 		Metadata:   map[string]any{"reason": reason},
@@ -346,7 +400,7 @@ func (s *MemoryStore) NextAssignmentVersion(_ context.Context, kliqID string) (i
 	return record.Version + 1, nil
 }
 
-func (s *MemoryStore) SaveAssignment(_ context.Context, kliqID string, version int64, envelope signing.SignedEnvelope) error {
+func (s *MemoryStore) SaveAssignment(ctx context.Context, kliqID string, version int64, envelope signing.SignedEnvelope) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if kliqID == "" || version <= 0 {
@@ -365,6 +419,7 @@ func (s *MemoryStore) SaveAssignment(_ context.Context, kliqID string, version i
 	s.assignments[kliqID] = assignmentRecord{Version: version, Envelope: envelope}
 	s.appendAuditLocked(domain.ManagementAuditEvent{
 		EventType:  "assignment_published",
+		Actor:      auditActor(ctx),
 		TargetType: "kliq_assignment",
 		TargetID:   fmt.Sprintf("%s:%d", kliqID, version),
 		KLIQID:     kliqID,
@@ -374,7 +429,7 @@ func (s *MemoryStore) SaveAssignment(_ context.Context, kliqID string, version i
 	return nil
 }
 
-func (s *MemoryStore) LatestAssignment(_ context.Context, kliqID string) (signing.SignedEnvelope, error) {
+func (s *MemoryStore) LatestAssignment(ctx context.Context, kliqID string) (signing.SignedEnvelope, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	record, ok := s.assignments[kliqID]
@@ -382,10 +437,11 @@ func (s *MemoryStore) LatestAssignment(_ context.Context, kliqID string) (signin
 		return signing.SignedEnvelope{}, ErrNotFound
 	}
 	if !record.RevokedAt.IsZero() {
-		return signing.SignedEnvelope{}, fmt.Errorf("assignment revoked")
+		return signing.SignedEnvelope{}, ErrNotFound
 	}
 	s.appendAuditLocked(domain.ManagementAuditEvent{
 		EventType:  "assignment_pulled",
+		Actor:      auditActor(ctx),
 		TargetType: "kliq_assignment",
 		TargetID:   fmt.Sprintf("%s:%d", kliqID, record.Version),
 		KLIQID:     kliqID,
@@ -395,7 +451,7 @@ func (s *MemoryStore) LatestAssignment(_ context.Context, kliqID string) (signin
 	return record.Envelope, nil
 }
 
-func (s *MemoryStore) RevokeAssignment(_ context.Context, kliqID string, version int64, reason string, revokedAt time.Time) error {
+func (s *MemoryStore) RevokeAssignment(ctx context.Context, kliqID string, version int64, reason string, revokedAt time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	record, ok := s.assignments[kliqID]
@@ -411,9 +467,11 @@ func (s *MemoryStore) RevokeAssignment(_ context.Context, kliqID string, version
 		TargetID:     fmt.Sprintf("%s:%d", kliqID, version),
 		Reason:       reason,
 		CreatedAt:    revokedAt.UTC(),
+		CreatedBy:    auditActor(ctx),
 	}
 	s.appendAuditLocked(domain.ManagementAuditEvent{
 		EventType:  "revocation",
+		Actor:      auditActor(ctx),
 		TargetType: "kliq_assignment",
 		TargetID:   fmt.Sprintf("%s:%d", kliqID, version),
 		KLIQID:     kliqID,
@@ -453,9 +511,12 @@ func (s *MemoryStore) StatusReport(_ context.Context, kliqID string) (domain.KLI
 	return report, nil
 }
 
-func (s *MemoryStore) SaveAuditEvent(_ context.Context, event domain.ManagementAuditEvent) error {
+func (s *MemoryStore) SaveAuditEvent(ctx context.Context, event domain.ManagementAuditEvent) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if event.Actor == "" {
+		event.Actor = auditActor(ctx)
+	}
 	s.appendAuditLocked(event)
 	return nil
 }

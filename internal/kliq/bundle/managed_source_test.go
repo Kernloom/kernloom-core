@@ -22,7 +22,7 @@ func TestManagedAssignmentSourceLoadsVerifiedRuntimeBundleArtifact(t *testing.T)
 		t.Fatal(err)
 	}
 	signer.Now = func() time.Time { return now }
-	runtimeEnvelope := json.RawMessage(`{"kind":"SignedEnvelope","payload":"runtime"}`)
+	runtimeEnvelope := managedSourceSignedRuntimeEnvelope(t, signer, now)
 	assignment := managedSourceTestAssignment(now, runtimeEnvelope)
 	envelope := signedAssignmentEnvelope(t, signer, assignment, now.Add(time.Hour))
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -69,7 +69,7 @@ func TestManagedAssignmentSourceAllowsSameVersionSameDigest(t *testing.T) {
 		t.Fatal(err)
 	}
 	signer.Now = func() time.Time { return now }
-	runtimeEnvelope := json.RawMessage(`{"kind":"SignedEnvelope","payload":"runtime"}`)
+	runtimeEnvelope := managedSourceSignedRuntimeEnvelope(t, signer, now)
 	assignment := managedSourceTestAssignment(now, runtimeEnvelope)
 	envelope := signedAssignmentEnvelope(t, signer, assignment, now.Add(time.Hour))
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -100,7 +100,7 @@ func TestManagedAssignmentSourceRejectsRollbackWithoutApproval(t *testing.T) {
 		t.Fatal(err)
 	}
 	signer.Now = func() time.Time { return now }
-	assignment := managedSourceTestAssignment(now, json.RawMessage(`{"kind":"SignedEnvelope"}`))
+	assignment := managedSourceTestAssignment(now, managedSourceSignedRuntimeEnvelope(t, signer, now))
 	envelope := signedAssignmentEnvelope(t, signer, assignment, now.Add(time.Hour))
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(envelope)
@@ -129,7 +129,7 @@ func TestManagedAssignmentSourceAcceptsSignedApprovedRollback(t *testing.T) {
 		t.Fatal(err)
 	}
 	signer.Now = func() time.Time { return now }
-	assignment := managedSourceTestAssignment(now, json.RawMessage(`{"kind":"SignedEnvelope"}`))
+	assignment := managedSourceTestAssignment(now, managedSourceSignedRuntimeEnvelope(t, signer, now))
 	assignment.ApprovedRollback = true
 	envelope := signedAssignmentEnvelope(t, signer, assignment, now.Add(time.Hour))
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -188,4 +188,26 @@ func signedAssignmentEnvelope(t *testing.T, signer *signing.DevLocalSigner, assi
 		t.Fatal(err)
 	}
 	return envelope
+}
+
+func managedSourceSignedRuntimeEnvelope(t *testing.T, signer *signing.DevLocalSigner, now time.Time) json.RawMessage {
+	t.Helper()
+	payload := []byte(`{"kind":"RuntimeBundle","metadata":{"id":"runtime_bundle.test","policy_id":"policy.test","artifact_type":"runtime_bundle","source_commit":"abc123"}}`)
+	envelope, err := signer.Sign(context.Background(), payload, signing.Metadata{
+		PolicyID:     "policy.test",
+		SourceCommit: "abc123",
+		ExpiresAt:    ptrTime(now.Add(time.Hour)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
+func ptrTime(value time.Time) *time.Time {
+	return &value
 }
