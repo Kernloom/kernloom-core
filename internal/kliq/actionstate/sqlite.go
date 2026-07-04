@@ -6,6 +6,7 @@ package actionstate
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -25,7 +26,14 @@ func OpenSQLite(path string) (*SQLiteStore, error) {
 	if path == "" {
 		return nil, fmt.Errorf("sqlite state path is required")
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil, err
+	}
+	if info, err := os.Stat(path); err == nil {
+		if info.Mode().Perm()&0o077 != 0 {
+			return nil, fmt.Errorf("sqlite state path %q must not be group/world accessible", path)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
 	db, err := sql.Open("sqlite", path)
@@ -34,6 +42,10 @@ func OpenSQLite(path string) (*SQLiteStore, error) {
 	}
 	store := &SQLiteStore{db: db}
 	if err := store.migrate(context.Background()); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -111,9 +123,13 @@ func (s *SQLiteStore) migrate(ctx context.Context) error {
 			artifact_ref TEXT NOT NULL DEFAULT '',
 			sha256 TEXT NOT NULL,
 			envelope_json BLOB NOT NULL,
+			activation_status TEXT NOT NULL DEFAULT '',
+			activation_message TEXT NOT NULL DEFAULT '',
 			activated_at TEXT NOT NULL,
 			PRIMARY KEY (kliq_id, assignment_id, artifact_type, artifact_id)
 		)`,
+		`ALTER TABLE kliq_assignment_artifacts ADD COLUMN activation_status TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE kliq_assignment_artifacts ADD COLUMN activation_message TEXT NOT NULL DEFAULT ''`,
 		`CREATE TABLE IF NOT EXISTS kliq_credentials (
 			id INTEGER PRIMARY KEY CHECK (id = 1),
 			kliq_id TEXT NOT NULL,
@@ -129,6 +145,11 @@ func (s *SQLiteStore) migrate(ctx context.Context) error {
 			service_token_expires_at TEXT NOT NULL,
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS kliq_local_trust_bundles (
+			key_id TEXT PRIMARY KEY,
+			bundle_json BLOB NOT NULL,
+			persisted_at TEXT NOT NULL
 		)`,
 		`DROP INDEX IF EXISTS runtime_action_leases_dedup`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS runtime_action_leases_dedup
@@ -167,6 +188,40 @@ func (s *SQLiteStore) migrate(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func (s *SQLiteStore) SaveLocalTrustBundle(ctx context.Context, bundle domain.TrustBundle, persistedAt time.Time) error {
+	if bundle.KeyID == "" || bundle.PublicKey == "" {
+		return fmt.Errorf("local trust bundle requires key_id and public_key")
+	}
+	if persistedAt.IsZero() {
+		persistedAt = time.Now().UTC()
+	}
+	data, err := json.Marshal(bundle)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `INSERT INTO kliq_local_trust_bundles
+		(key_id, bundle_json, persisted_at)
+		VALUES (?, ?, ?)
+		ON CONFLICT (key_id) DO UPDATE SET
+			bundle_json = excluded.bundle_json,
+			persisted_at = excluded.persisted_at`,
+		bundle.KeyID, data, formatTime(persistedAt))
+	return err
+}
+
+func (s *SQLiteStore) LastLocalTrustBundle(ctx context.Context) (domain.TrustBundle, error) {
+	var data []byte
+	err := s.db.QueryRowContext(ctx, `SELECT bundle_json FROM kliq_local_trust_bundles ORDER BY persisted_at DESC LIMIT 1`).Scan(&data)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.TrustBundle{}, ErrNotFound
+	}
+	if err != nil {
+		return domain.TrustBundle{}, err
+	}
+	var bundle domain.TrustBundle
+	return bundle, json.Unmarshal(data, &bundle)
 }
 
 func (s *SQLiteStore) SaveBundle(ctx context.Context, record BundleRecord) error {
@@ -229,8 +284,8 @@ func (s *SQLiteStore) SaveManagedBundleActivation(ctx context.Context, record Bu
 	}
 	for _, artifact := range artifacts {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO kliq_assignment_artifacts (
-			kliq_id, assignment_id, assignment_version, artifact_type, artifact_id, artifact_ref, sha256, envelope_json, activated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			kliq_id, assignment_id, assignment_version, artifact_type, artifact_id, artifact_ref, sha256, envelope_json, activation_status, activation_message, activated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			artifact.KLIQID,
 			artifact.AssignmentID,
 			artifact.AssignmentVersion,
@@ -239,6 +294,8 @@ func (s *SQLiteStore) SaveManagedBundleActivation(ctx context.Context, record Bu
 			artifact.ArtifactRef,
 			artifact.SHA256,
 			artifact.EnvelopeJSON,
+			artifact.ActivationStatus,
+			artifact.ActivationMessage,
 			formatTime(artifact.ActivatedAt),
 		); err != nil {
 			return err
@@ -254,6 +311,7 @@ func validateAssignmentArtifactRecord(record AssignmentArtifactRecord) error {
 		"artifact_type": record.ArtifactType,
 		"artifact_id":   record.ArtifactID,
 		"sha256":        record.SHA256,
+		"status":        record.ActivationStatus,
 	}
 	for field, value := range required {
 		if value == "" {
@@ -505,7 +563,7 @@ func (s *SQLiteStore) KLIQManagementState(ctx context.Context, kliqID string) (K
 
 func (s *SQLiteStore) AssignmentArtifacts(ctx context.Context, kliqID string) ([]AssignmentArtifactRecord, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT
-		kliq_id, assignment_id, assignment_version, artifact_type, artifact_id, artifact_ref, sha256, envelope_json, activated_at
+		kliq_id, assignment_id, assignment_version, artifact_type, artifact_id, artifact_ref, sha256, envelope_json, activation_status, activation_message, activated_at
 		FROM kliq_assignment_artifacts WHERE kliq_id = ? ORDER BY artifact_type, artifact_id`, kliqID)
 	if err != nil {
 		return nil, err
@@ -524,6 +582,8 @@ func (s *SQLiteStore) AssignmentArtifacts(ctx context.Context, kliqID string) ([
 			&record.ArtifactRef,
 			&record.SHA256,
 			&record.EnvelopeJSON,
+			&record.ActivationStatus,
+			&record.ActivationMessage,
 			&activatedAt,
 		); err != nil {
 			return nil, err

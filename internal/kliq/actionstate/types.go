@@ -35,6 +35,8 @@ type AssignmentArtifactRecord struct {
 	ArtifactRef       string
 	SHA256            string
 	EnvelopeJSON      []byte
+	ActivationStatus  string
+	ActivationMessage string
 	ActivatedAt       time.Time
 }
 
@@ -62,6 +64,12 @@ type KLIQCredential struct {
 	ServiceTokenExpiresAt time.Time
 	CreatedAt             time.Time
 	UpdatedAt             time.Time
+}
+
+type LocalTrustBundleRecord struct {
+	KeyID       string
+	BundleJSON  []byte
+	PersistedAt time.Time
 }
 
 type RuntimeActionLease struct {
@@ -188,6 +196,8 @@ type Store interface {
 	AssignmentArtifacts(ctx context.Context, kliqID string) ([]AssignmentArtifactRecord, error)
 	SaveKLIQCredential(ctx context.Context, credential KLIQCredential) error
 	KLIQCredential(ctx context.Context) (KLIQCredential, error)
+	SaveLocalTrustBundle(ctx context.Context, bundle domain.TrustBundle, persistedAt time.Time) error
+	LastLocalTrustBundle(ctx context.Context) (domain.TrustBundle, error)
 	SaveKLIQManagementState(ctx context.Context, state KLIQManagementState) error
 	KLIQManagementState(ctx context.Context, kliqID string) (KLIQManagementState, error)
 	UpsertLease(ctx context.Context, lease RuntimeActionLease) error

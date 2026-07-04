@@ -136,6 +136,7 @@ type PolicyBuildManifest struct {
 	Kind     string           `json:"kind"`
 	Metadata ManifestMetadata `json:"metadata"`
 	Spec     ManifestSpec     `json:"spec"`
+	Approval ManifestApproval `json:"approval,omitempty"`
 }
 
 type ManifestMetadata struct {
@@ -157,6 +158,12 @@ type ManifestSpec struct {
 	Outputs            map[string]string           `json:"outputs"`
 	ArtifactRefs       map[string]coreartifact.Ref `json:"artifact_refs,omitempty"`
 	SignedOutputs      map[string]SignedOutputRef  `json:"signed_outputs,omitempty"`
+}
+
+type ManifestApproval struct {
+	Status     string    `json:"status"`
+	ApprovedBy string    `json:"approved_by,omitempty"`
+	ApprovedAt time.Time `json:"approved_at,omitempty"`
 }
 
 type KNIRef struct {

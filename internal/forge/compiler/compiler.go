@@ -301,6 +301,9 @@ func compileOne(ctx context.Context, card *intent.Card, catalog *registry.Catalo
 	manifest := PolicyBuildManifest{
 		Kind:     "PolicyBuildManifest",
 		Metadata: ManifestMetadata{ID: "build." + card.ID, CorrelationID: correlationID},
+		Approval: ManifestApproval{
+			Status: "pending_review",
+		},
 		Spec: ManifestSpec{
 			KNI:      KNIRef{Version: card.Version},
 			Protocol: ProtocolRef{Version: "adapter/v1"},

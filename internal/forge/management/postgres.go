@@ -396,9 +396,14 @@ func (s *PostgresStore) SaveTrustBundle(ctx context.Context, bundle domain.Trust
 	if bundle.KeyID == "" {
 		return fmt.Errorf("trust bundle requires key_id")
 	}
+	if bundle.Status == "" {
+		bundle.Status = "active"
+	}
 	existing, err := s.TrustBundle(ctx, bundle.KeyID)
-	if err == nil && existing.Status == "revoked" && bundle.Status == "active" {
-		return fmt.Errorf("trust bundle %q is revoked and cannot be reactivated", bundle.KeyID)
+	if err == nil {
+		if err := validateTrustBundleUpdate(existing, bundle); err != nil {
+			return err
+		}
 	}
 	if err != nil && !errors.Is(err, ErrNotFound) {
 		return err

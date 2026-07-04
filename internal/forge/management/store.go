@@ -345,8 +345,13 @@ func (s *MemoryStore) SaveTrustBundle(_ context.Context, bundle domain.TrustBund
 	if bundle.KeyID == "" {
 		return fmt.Errorf("trust bundle requires key_id")
 	}
-	if existing, ok := s.trustBundles[bundle.KeyID]; ok && existing.Status == "revoked" && bundle.Status == "active" {
-		return fmt.Errorf("trust bundle %q is revoked and cannot be reactivated", bundle.KeyID)
+	if bundle.Status == "" {
+		bundle.Status = "active"
+	}
+	if existing, ok := s.trustBundles[bundle.KeyID]; ok {
+		if err := validateTrustBundleUpdate(existing, bundle); err != nil {
+			return err
+		}
 	}
 	s.trustBundles[bundle.KeyID] = bundle
 	return nil
@@ -563,4 +568,41 @@ func assignmentDigest(envelope signing.SignedEnvelope) string {
 	}
 	sum := sha256.Sum256(envelope.Payload)
 	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+func validateTrustBundleUpdate(existing, incoming domain.TrustBundle) error {
+	if existing.KeyID != incoming.KeyID {
+		return fmt.Errorf("trust bundle key_id mismatch")
+	}
+	if existing.PublicKey != "" && incoming.PublicKey != "" && existing.PublicKey != incoming.PublicKey {
+		return fmt.Errorf("trust bundle %q public key cannot be replaced without explicit rotation", incoming.KeyID)
+	}
+	if existing.Purpose != "" && incoming.Purpose != "" && existing.Purpose != incoming.Purpose {
+		return fmt.Errorf("trust bundle %q purpose cannot be changed without explicit rotation", incoming.KeyID)
+	}
+	if existing.Issuer != "" && incoming.Issuer != "" && existing.Issuer != incoming.Issuer {
+		return fmt.Errorf("trust bundle %q issuer cannot be changed without explicit rotation", incoming.KeyID)
+	}
+	if !incoming.ExpiresAt.IsZero() && !existing.ExpiresAt.IsZero() && incoming.ExpiresAt.After(existing.ExpiresAt) {
+		return fmt.Errorf("trust bundle %q expiry cannot be silently extended", incoming.KeyID)
+	}
+	switch existing.Status {
+	case "", "active", "previous":
+		switch incoming.Status {
+		case "", existing.Status, "active", "previous", "revoked":
+			if existing.Status == "previous" && incoming.Status == "active" {
+				return fmt.Errorf("trust bundle %q cannot move from previous to active without explicit rotation", incoming.KeyID)
+			}
+			return nil
+		default:
+			return fmt.Errorf("trust bundle %q has invalid status transition %q to %q", incoming.KeyID, existing.Status, incoming.Status)
+		}
+	case "revoked":
+		if incoming.Status != "revoked" {
+			return fmt.Errorf("trust bundle %q is revoked and cannot be reactivated", incoming.KeyID)
+		}
+		return nil
+	default:
+		return fmt.Errorf("trust bundle %q has unsupported existing status %q", incoming.KeyID, existing.Status)
+	}
 }

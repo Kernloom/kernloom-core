@@ -85,7 +85,7 @@ func TestManagerLoadManagedBundlePersistsAssignmentVersionAndRejectsOlderAfterRe
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(artifacts) != 1 || artifacts[0].ArtifactType != "runtime_bundle" || artifacts[0].AssignmentVersion != 2 {
+	if len(artifacts) != 1 || artifacts[0].ArtifactType != "runtime_bundle" || artifacts[0].AssignmentVersion != 2 || artifacts[0].ActivationStatus != "activated" {
 		t.Fatalf("expected staged runtime bundle artifact for active assignment, got %#v", artifacts)
 	}
 	if err := store.Close(); err != nil {

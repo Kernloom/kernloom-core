@@ -19,6 +19,7 @@ import (
 	coreartifact "github.com/kernloom/kernloom-core/internal/core/artifact"
 	"github.com/kernloom/kernloom-core/internal/core/domain"
 	"github.com/kernloom/kernloom-core/internal/core/signing"
+	"github.com/kernloom/kernloom-core/internal/forge/compiler"
 	"github.com/kernloom/kernloom-core/internal/forge/management"
 )
 
@@ -64,6 +65,7 @@ type assignmentPlanRequest struct {
 	KLIQID           string                        `json:"kliq_id"`
 	SourceCommit     string                        `json:"source_commit"`
 	TrustBundleRef   string                        `json:"trust_bundle_ref,omitempty"`
+	ApprovedBuildRef coreartifact.Ref              `json:"approved_build_ref"`
 	ExpiresAt        time.Time                     `json:"expires_at"`
 	ApprovedRollback bool                          `json:"approved_rollback,omitempty"`
 	Artifacts        []domain.KLIQAssignedArtifact `json:"artifacts"`
@@ -309,6 +311,15 @@ func (s Server) planKLIQAssignment(w http.ResponseWriter, r *http.Request, princ
 		writeError(w, http.StatusBadRequest, "invalid_assignment_plan")
 		return
 	}
+	if err := rejectRawAssignmentArtifactEnvelopes(req.Artifacts); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	approvedBuild, err := s.validateApprovedBuild(r, registration, req)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	artifacts, err := s.resolveAssignmentArtifacts(r, req)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -357,18 +368,80 @@ func (s Server) planKLIQAssignment(w http.ResponseWriter, r *http.Request, princ
 		Metadata: map[string]any{
 			"assignment_version": assignment.AssignmentVersion,
 			"source_commit":      assignment.SourceCommit,
+			"approved_build_id":  approvedBuild.Metadata.ID,
+			"approved_build_ref": req.ApprovedBuildRef.URI,
 		},
 		CreatedAt: now,
 	})
 	writeJSON(w, http.StatusCreated, envelope)
 }
 
+func (s Server) validateApprovedBuild(r *http.Request, registration domain.KLIQRegistration, req assignmentPlanRequest) (compiler.PolicyBuildManifest, error) {
+	if strings.TrimSpace(req.ApprovedBuildRef.URI) == "" || strings.TrimSpace(req.ApprovedBuildRef.SHA256) == "" {
+		return compiler.PolicyBuildManifest{}, fmt.Errorf("approved_build_required")
+	}
+	payload, err := s.Artifacts.Get(r.Context(), req.ApprovedBuildRef)
+	if err != nil {
+		return compiler.PolicyBuildManifest{}, fmt.Errorf("approved_build_unavailable")
+	}
+	var manifest compiler.PolicyBuildManifest
+	if err := json.Unmarshal(payload, &manifest); err != nil {
+		return compiler.PolicyBuildManifest{}, fmt.Errorf("approved_build_invalid")
+	}
+	if manifest.Kind != "PolicyBuildManifest" {
+		return compiler.PolicyBuildManifest{}, fmt.Errorf("approved_build_invalid_kind")
+	}
+	if manifest.Approval.Status != "approved" {
+		return compiler.PolicyBuildManifest{}, fmt.Errorf("approved_build_not_approved")
+	}
+	if strings.TrimSpace(manifest.Spec.PolicyRepo.Commit) != strings.TrimSpace(req.SourceCommit) {
+		return compiler.PolicyBuildManifest{}, fmt.Errorf("approved_build_source_commit_mismatch")
+	}
+	if manifest.Spec.CoreRegistry.ContentDigest == "" ||
+		manifest.Spec.EnterpriseRegistry.ContentDigest == "" ||
+		manifest.Spec.CatalogDigest == "" ||
+		manifest.Spec.Profile.Digest == "" ||
+		manifest.Spec.RiskRecipe.Digest == "" {
+		return compiler.PolicyBuildManifest{}, fmt.Errorf("approved_build_missing_provenance")
+	}
+	if manifest.Metadata.ID == "" {
+		return compiler.PolicyBuildManifest{}, fmt.Errorf("approved_build_missing_id")
+	}
+	if registration.Environment == "" || registration.Stage == "" || registration.Scope == "" {
+		return compiler.PolicyBuildManifest{}, fmt.Errorf("kliq_registration_scope_incomplete")
+	}
+	for _, requested := range req.Artifacts {
+		if err := validateArtifactInApprovedBuild(manifest, requested); err != nil {
+			return compiler.PolicyBuildManifest{}, err
+		}
+	}
+	return manifest, nil
+}
+
+func validateArtifactInApprovedBuild(manifest compiler.PolicyBuildManifest, requested domain.KLIQAssignedArtifact) error {
+	artifactType := strings.TrimSpace(requested.ArtifactType)
+	ref := coreartifact.Ref{URI: strings.TrimSpace(requested.ArtifactRef), SHA256: strings.TrimSpace(requested.SHA256)}
+	if ref.URI == "" || ref.SHA256 == "" {
+		return fmt.Errorf("invalid_artifact_ref")
+	}
+	if signed, ok := manifest.Spec.SignedOutputs[artifactType]; ok {
+		if signed.ArtifactRef.URI == ref.URI && signed.ArtifactRef.SHA256 == ref.SHA256 {
+			return nil
+		}
+		return fmt.Errorf("artifact_not_in_approved_build")
+	}
+	if unsigned, ok := manifest.Spec.ArtifactRefs[artifactType]; ok {
+		if unsigned.URI == ref.URI && unsigned.SHA256 == ref.SHA256 {
+			return nil
+		}
+		return fmt.Errorf("artifact_not_in_approved_build")
+	}
+	return fmt.Errorf("artifact_not_in_approved_build")
+}
+
 func (s Server) resolveAssignmentArtifacts(r *http.Request, req assignmentPlanRequest) ([]domain.KLIQAssignedArtifact, error) {
 	artifacts := make([]domain.KLIQAssignedArtifact, 0, len(req.Artifacts))
 	for _, requested := range req.Artifacts {
-		if len(requested.Envelope) > 0 && strings.TrimSpace(string(requested.Envelope)) != "null" {
-			return nil, fmt.Errorf("raw_artifact_envelope_not_allowed")
-		}
 		if strings.TrimSpace(requested.ArtifactType) == "" || strings.TrimSpace(requested.ArtifactID) == "" {
 			return nil, fmt.Errorf("invalid_artifact_ref")
 		}
@@ -408,6 +481,15 @@ func (s Server) resolveAssignmentArtifacts(r *http.Request, req assignmentPlanRe
 		})
 	}
 	return artifacts, nil
+}
+
+func rejectRawAssignmentArtifactEnvelopes(artifacts []domain.KLIQAssignedArtifact) error {
+	for _, artifact := range artifacts {
+		if len(artifact.Envelope) > 0 && strings.TrimSpace(string(artifact.Envelope)) != "null" {
+			return fmt.Errorf("raw_artifact_envelope_not_allowed")
+		}
+	}
+	return nil
 }
 
 func allowedAssignmentArtifactType(artifactType string) bool {

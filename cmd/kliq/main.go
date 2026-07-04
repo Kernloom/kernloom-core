@@ -468,12 +468,13 @@ func auditPendingCmd(args []string) {
 }
 
 func managerOrExit(statePath, trustBundlePath string, allowPrivateDevMaterial bool, registry kliqruntime.AdapterRuntimeRegistry) (kliqruntime.Manager, func()) {
-	verifier, trustBundle, err := loadTrustVerifier(trustBundlePath, allowPrivateDevMaterial)
+	store, closeStore := stateStoreOrExit(statePath)
+	verifier, trustBundle, err := loadTrustVerifierForStore(context.Background(), trustBundlePath, allowPrivateDevMaterial, store)
 	if err != nil {
+		closeStore()
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	store, closeStore := stateStoreOrExit(statePath)
 	manager := kliqruntime.Manager{
 		Store:       store,
 		Verifier:    verifier,

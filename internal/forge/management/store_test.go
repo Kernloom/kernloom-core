@@ -167,6 +167,55 @@ func TestMemoryStoreDoesNotReactivateRevokedTrustBundle(t *testing.T) {
 	}
 }
 
+func TestMemoryStoreRejectsTrustBundlePublicKeyReplacement(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := context.Background()
+	now := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+	bundle := domain.TrustBundle{
+		KeyID:     "forge-management-dev-local",
+		PublicKey: "public-key-a",
+		Purpose:   "kliq_assignment",
+		Status:    "active",
+		ExpiresAt: now.Add(time.Hour),
+		Issuer:    "test",
+	}
+	if err := store.SaveTrustBundle(ctx, bundle); err != nil {
+		t.Fatal(err)
+	}
+	replacement := bundle
+	replacement.PublicKey = "public-key-b"
+	if err := store.SaveTrustBundle(ctx, replacement); err == nil {
+		t.Fatal("expected same key id with different public key to be rejected")
+	}
+}
+
+func TestMemoryStoreRejectsSilentTrustBundleExpiryExtension(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := context.Background()
+	now := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+	bundle := domain.TrustBundle{
+		KeyID:     "forge-management-dev-local",
+		PublicKey: "public-key",
+		Purpose:   "kliq_assignment",
+		Status:    "active",
+		ExpiresAt: now.Add(time.Hour),
+		Issuer:    "test",
+	}
+	if err := store.SaveTrustBundle(ctx, bundle); err != nil {
+		t.Fatal(err)
+	}
+	extended := bundle
+	extended.ExpiresAt = now.Add(2 * time.Hour)
+	if err := store.SaveTrustBundle(ctx, extended); err == nil {
+		t.Fatal("expected silent trust bundle expiry extension to be rejected")
+	}
+	shorter := bundle
+	shorter.ExpiresAt = now.Add(30 * time.Minute)
+	if err := store.SaveTrustBundle(ctx, shorter); err != nil {
+		t.Fatalf("expected shorter expiry update to be accepted: %v", err)
+	}
+}
+
 func TestMemoryStoreLatestAssignmentDoesNotFallbackAfterLatestRevoked(t *testing.T) {
 	store := NewMemoryStore()
 	ctx := context.Background()

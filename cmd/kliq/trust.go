@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/x509"
 	"encoding/base64"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/kernloom/kernloom-core/internal/core/domain"
 	"github.com/kernloom/kernloom-core/internal/core/signing"
+	"github.com/kernloom/kernloom-core/internal/kliq/actionstate"
 )
 
 const defaultTrustBundlePath = "/etc/kernloom/trust/forge-management.public.json"
@@ -58,6 +60,31 @@ func loadTrustVerifier(path string, allowPrivateDevMaterial bool) (signing.Verif
 		return nil, domain.TrustBundle{}, err
 	}
 	return verifierFromTrustMaterial(path, key)
+}
+
+func loadTrustVerifierForStore(ctx context.Context, path string, allowPrivateDevMaterial bool, store actionstate.Store) (signing.Verifier, domain.TrustBundle, error) {
+	verifier, bundle, err := loadTrustVerifier(path, allowPrivateDevMaterial)
+	if err == nil {
+		if bundle.KeyID != "" && store != nil {
+			_ = store.SaveLocalTrustBundle(ctx, bundle, time.Now().UTC())
+		}
+		return verifier, bundle, nil
+	}
+	if store == nil || !os.IsNotExist(err) {
+		return nil, domain.TrustBundle{}, err
+	}
+	bundle, fallbackErr := store.LastLocalTrustBundle(ctx)
+	if fallbackErr != nil {
+		return nil, domain.TrustBundle{}, err
+	}
+	if validateErr := validateTrustBundleForKLIQ(bundle); validateErr != nil {
+		return nil, domain.TrustBundle{}, validateErr
+	}
+	verifier, verifierErr := verifierFromTrustBundle(bundle)
+	if verifierErr != nil {
+		return nil, domain.TrustBundle{}, verifierErr
+	}
+	return verifier, bundle, nil
 }
 
 func verifierFromTrustMaterial(path string, key trustMaterial) (signing.Verifier, domain.TrustBundle, error) {

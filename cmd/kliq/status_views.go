@@ -27,14 +27,25 @@ type statusSnapshot struct {
 }
 
 type assignmentView struct {
-	KLIQID          string `json:"kliq_id"`
-	AssignmentID    string `json:"assignment_id"`
-	Version         int64  `json:"version"`
-	SourceCommit    string `json:"source_commit"`
-	Digest          string `json:"digest"`
-	ExpiresAt       string `json:"expires_at"`
-	ActivatedAt     string `json:"activated_at"`
-	CredentialState string `json:"credential_state,omitempty"`
+	KLIQID          string                   `json:"kliq_id"`
+	AssignmentID    string                   `json:"assignment_id"`
+	Version         int64                    `json:"version"`
+	SourceCommit    string                   `json:"source_commit"`
+	Digest          string                   `json:"digest"`
+	ExpiresAt       string                   `json:"expires_at"`
+	ActivatedAt     string                   `json:"activated_at"`
+	CredentialState string                   `json:"credential_state,omitempty"`
+	Artifacts       []assignmentArtifactView `json:"artifacts,omitempty"`
+}
+
+type assignmentArtifactView struct {
+	ArtifactType      string `json:"artifact_type"`
+	ArtifactID        string `json:"artifact_id"`
+	ArtifactRefSHA256 string `json:"artifact_ref_sha256,omitempty"`
+	SHA256            string `json:"sha256"`
+	ActivationStatus  string `json:"activation_status"`
+	ActivationMessage string `json:"activation_message,omitempty"`
+	ActivatedAt       string `json:"activated_at"`
 }
 
 type bundleStatusView struct {
@@ -131,6 +142,9 @@ func buildStatusSnapshot(ctx context.Context, store actionstate.Store, statePath
 				ActivatedAt:     formatStatusTime(state.ActiveAssignmentActivatedAt),
 				CredentialState: credentialStatus(credential),
 			}
+			if artifacts, err := store.AssignmentArtifacts(ctx, credential.KLIQID); err == nil {
+				snapshot.Assignment.Artifacts = assignmentArtifactViews(artifacts)
+			}
 		}
 	}
 	if bundleErr == nil {
@@ -140,6 +154,28 @@ func buildStatusSnapshot(ctx context.Context, store actionstate.Store, statePath
 		snapshot.Findings = append(snapshot.Findings, "bundle unavailable")
 	}
 	return snapshot, nil
+}
+
+func assignmentArtifactViews(records []actionstate.AssignmentArtifactRecord) []assignmentArtifactView {
+	views := make([]assignmentArtifactView, 0, len(records))
+	for _, record := range records {
+		views = append(views, assignmentArtifactView{
+			ArtifactType:      record.ArtifactType,
+			ArtifactID:        record.ArtifactID,
+			ArtifactRefSHA256: redactedHash(record.ArtifactRef),
+			SHA256:            record.SHA256,
+			ActivationStatus:  record.ActivationStatus,
+			ActivationMessage: record.ActivationMessage,
+			ActivatedAt:       formatStatusTime(record.ActivatedAt),
+		})
+	}
+	sort.Slice(views, func(i, j int) bool {
+		if views[i].ArtifactType == views[j].ArtifactType {
+			return views[i].ArtifactID < views[j].ArtifactID
+		}
+		return views[i].ArtifactType < views[j].ArtifactType
+	})
+	return views
 }
 
 func credentialStatus(credential actionstate.KLIQCredential) string {

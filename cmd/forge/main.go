@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/pem"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -242,10 +243,27 @@ func seedManagementTrustBundle(store management.Store, signer *signing.DevLocalS
 	if signer == nil {
 		return nil
 	}
+	publicKey := base64.StdEncoding.EncodeToString(signer.PublicKey)
+	existing, err := store.TrustBundle(context.Background(), signer.KeyID)
+	if err == nil {
+		if existing.PublicKey != publicKey {
+			return fmt.Errorf("existing management trust bundle %q public key does not match signing key", signer.KeyID)
+		}
+		if existing.Status != "active" && existing.Status != "previous" {
+			return fmt.Errorf("existing management trust bundle %q is %q", signer.KeyID, existing.Status)
+		}
+		if !existing.ExpiresAt.IsZero() && !time.Now().UTC().Before(existing.ExpiresAt.UTC()) {
+			return fmt.Errorf("existing management trust bundle %q is expired", signer.KeyID)
+		}
+		return nil
+	}
+	if err != nil && !errors.Is(err, management.ErrNotFound) {
+		return err
+	}
 	expiresAt := time.Now().UTC().Add(24 * time.Hour)
 	return store.SaveTrustBundle(context.Background(), domain.TrustBundle{
 		KeyID:     signer.KeyID,
-		PublicKey: base64.StdEncoding.EncodeToString(signer.PublicKey),
+		PublicKey: publicKey,
 		Purpose:   "kliq_assignment",
 		Status:    "active",
 		ExpiresAt: expiresAt,

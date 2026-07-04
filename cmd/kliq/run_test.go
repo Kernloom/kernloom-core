@@ -153,6 +153,45 @@ func TestKLIQRunStandaloneOnceLoadsBundleWithRuntimeCore(t *testing.T) {
 	}
 }
 
+func TestRuntimeDecisionSourceFromFileReadsArray(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "decisions.json")
+	data := []byte(`[
+		{
+			"decision_id": "decision.local.1",
+			"adapter_id": "adapter.test",
+			"capability_id": "capability.test",
+			"capability_grant_id": "grant.test",
+			"action_type": "runtime_action.deny_temporarily_source",
+			"target_scope": "source",
+			"target_key": "192.0.2.10",
+			"ttl": "30s",
+			"reason": "local decision source smoke",
+			"audit_id": "audit.local.1"
+		}
+	]`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	source, err := runtimeDecisionSourceFromFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, ok, err := source.NextDecision(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || req.DecisionID != "decision.local.1" || req.AdapterID != "adapter.test" {
+		t.Fatalf("unexpected decision source result ok=%v req=%#v", ok, req)
+	}
+	_, ok, err = source.NextDecision(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok {
+		t.Fatal("expected decision source to be exhausted")
+	}
+}
+
 func TestKLIQRunFlushesAuditSpoolToForge(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 4, 12, 0, 0, 0, time.UTC)

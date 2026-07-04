@@ -61,6 +61,7 @@ type runOptions struct {
 	DecisionInterval   time.Duration
 	ReconcileInterval  time.Duration
 	AuditFlushInterval time.Duration
+	DecisionSource     string
 	Once               bool
 	Adapters           []string
 	HTTPClient         *http.Client
@@ -99,6 +100,7 @@ func run(args []string) {
 	fs.DurationVar(&opts.DecisionInterval, "decision-interval", 5*time.Second, "runtime decision source polling interval")
 	fs.DurationVar(&opts.ReconcileInterval, "reconcile-interval", 30*time.Second, "runtime action lease reconciliation interval")
 	fs.DurationVar(&opts.AuditFlushInterval, "audit-flush-interval", time.Minute, "audit spool flush interval")
+	fs.StringVar(&opts.DecisionSource, "decision-source", "", "optional local runtime decision source file; JSON object or array of execute-action requests")
 	fs.BoolVar(&opts.Once, "once", false, "run one daemon cycle and exit; intended for smoke tests")
 	fs.Var(&adapters, "adapter", "dev/bootstrap adapter runtime endpoint as adapter_id=host:port; repeatable; managed production should prefer adapter_assignment artifacts")
 	if err := fs.Parse(args); err != nil {
@@ -119,15 +121,15 @@ func runKLIQ(ctx context.Context, opts runOptions) error {
 	if opts.TrustBundlePath == "" {
 		return fmt.Errorf("kliq run requires --trust-bundle")
 	}
-	verifier, trustBundle, err := loadTrustVerifier(opts.TrustBundlePath, opts.DevAllowPrivateKey)
-	if err != nil {
-		return err
-	}
 	store, err := actionstate.OpenSQLite(opts.StatePath)
 	if err != nil {
 		return err
 	}
 	defer store.Close()
+	verifier, trustBundle, err := loadTrustVerifierForStore(ctx, opts.TrustBundlePath, opts.DevAllowPrivateKey, store)
+	if err != nil {
+		return err
+	}
 	registry, closeAdapters, err := adapterRegistryFromFlags(opts.Adapters)
 	if err != nil {
 		return err
@@ -148,6 +150,13 @@ func runKLIQ(ctx context.Context, opts runOptions) error {
 		daemon.httpClient = opts.HTTPClient
 	} else {
 		daemon.httpClient = http.DefaultClient
+	}
+	if opts.DecisionSource != "" {
+		source, err := runtimeDecisionSourceFromFile(opts.DecisionSource)
+		if err != nil {
+			return err
+		}
+		daemon.decisions = source
 	}
 	if opts.Mode == kliqRunModeManaged {
 		credential, err := store.KLIQCredential(ctx)
@@ -679,6 +688,48 @@ func newTicker(interval time.Duration) *time.Ticker {
 		interval = time.Minute
 	}
 	return time.NewTicker(interval)
+}
+
+type fileRuntimeDecisionSource struct {
+	requests []kliqruntime.ExecuteRequest
+	index    int
+}
+
+func runtimeDecisionSourceFromFile(path string) (*fileRuntimeDecisionSource, error) {
+	path = strings.TrimSpace(strings.TrimPrefix(path, "file://"))
+	if path == "" {
+		return nil, fmt.Errorf("decision source path is required")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	trimmed := strings.TrimSpace(string(data))
+	if trimmed == "" {
+		return &fileRuntimeDecisionSource{}, nil
+	}
+	var requests []kliqruntime.ExecuteRequest
+	if strings.HasPrefix(trimmed, "[") {
+		if err := json.Unmarshal([]byte(trimmed), &requests); err != nil {
+			return nil, err
+		}
+	} else {
+		var request kliqruntime.ExecuteRequest
+		if err := json.Unmarshal([]byte(trimmed), &request); err != nil {
+			return nil, err
+		}
+		requests = append(requests, request)
+	}
+	return &fileRuntimeDecisionSource{requests: requests}, nil
+}
+
+func (s *fileRuntimeDecisionSource) NextDecision(_ context.Context) (kliqruntime.ExecuteRequest, bool, error) {
+	if s == nil || s.index >= len(s.requests) {
+		return kliqruntime.ExecuteRequest{}, false, nil
+	}
+	request := s.requests[s.index]
+	s.index++
+	return request, true, nil
 }
 
 func adapterRegistryFromFlags(values []string) (kliqruntime.AdapterRuntimeRegistry, func(), error) {

@@ -36,19 +36,19 @@ type managedActivationStore interface {
 }
 
 type ExecuteRequest struct {
-	DecisionID                  string
-	AdapterID                   string
-	CapabilityID                string
-	CapabilityGrantID           string
-	Mode                        string
-	ActionType                  string
-	TargetScope                 string
-	TargetKey                   string
-	TTL                         string
-	Reason                      string
-	AuditID                     string
-	CorrelationID               string
-	DeriveAuditIDFromDecisionID bool
+	DecisionID                  string `json:"decision_id"`
+	AdapterID                   string `json:"adapter_id"`
+	CapabilityID                string `json:"capability_id"`
+	CapabilityGrantID           string `json:"capability_grant_id"`
+	Mode                        string `json:"mode,omitempty"`
+	ActionType                  string `json:"action_type"`
+	TargetScope                 string `json:"target_scope,omitempty"`
+	TargetKey                   string `json:"target_key"`
+	TTL                         string `json:"ttl,omitempty"`
+	Reason                      string `json:"reason"`
+	AuditID                     string `json:"audit_id,omitempty"`
+	CorrelationID               string `json:"correlation_id,omitempty"`
+	DeriveAuditIDFromDecisionID bool   `json:"derive_audit_id_from_decision_id,omitempty"`
 }
 
 type RuntimeActionExecutionResult struct {
@@ -155,10 +155,44 @@ func assignmentArtifactRecords(activation kliqbundle.ManagedAssignmentActivation
 			ArtifactRef:       artifact.ArtifactRef,
 			SHA256:            artifact.SHA256,
 			EnvelopeJSON:      append([]byte(nil), artifact.Envelope...),
+			ActivationStatus:  assignmentArtifactActivationStatus(artifact.ArtifactType),
+			ActivationMessage: assignmentArtifactActivationMessage(artifact.ArtifactType),
 			ActivatedAt:       activatedAt,
 		})
 	}
 	return records
+}
+
+func assignmentArtifactActivationStatus(artifactType string) string {
+	switch artifactType {
+	case "runtime_bundle":
+		return "activated"
+	case "adapter_assignment", "context_route_pack", "conformance_expectation", "trust_bundle", "management_profile", "fallback_profile":
+		return "validated_staged"
+	default:
+		return "unknown"
+	}
+}
+
+func assignmentArtifactActivationMessage(artifactType string) string {
+	switch artifactType {
+	case "runtime_bundle":
+		return "runtime bundle verified and active"
+	case "adapter_assignment":
+		return "adapter assignment staged; daemon registry activation runs after bundle activation"
+	case "context_route_pack":
+		return "context route pack staged for future context projection activation"
+	case "conformance_expectation":
+		return "conformance expectation staged for future evidence activation"
+	case "trust_bundle":
+		return "trust bundle artifact staged; local trust bundle file remains current verifier source"
+	case "management_profile":
+		return "management profile staged for future runtime loop configuration"
+	case "fallback_profile":
+		return "fallback profile staged for future failure policy activation"
+	default:
+		return "artifact type not recognized by activation status mapper"
+	}
 }
 
 func (m Manager) loadBundle(ctx context.Context, source kliqbundle.Source) (actionstate.BundleRecord, error) {

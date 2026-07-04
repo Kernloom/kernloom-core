@@ -17,9 +17,13 @@ Operational defaults for this slice:
 
 - Assignment polling uses the local KLIQ service identity created by enrollment.
 - KLIQ verifies Forge-managed assignments with public trust material only.
+- Forge startup does not silently replace, rotate or extend existing trust bundles.
+- Production assignment planning requires an approved PolicyBuildManifest binding.
+- The local KLIQ SQLite state database must not be group/world accessible; KLIQ creates it with `0600`.
 - A newer assignment is verified and staged before the active assignment pointer changes.
-- All assigned artifacts are verified and staged; RuntimeBundle is the first actively enforced artifact in this slice.
+- All assigned artifacts are verified and staged with explicit activation status; RuntimeBundle and AdapterAssignment are the first active consumers in this slice.
 - `adapter_assignment` artifacts can provide managed adapter endpoints. `--adapter` remains a dev/bootstrap override.
+- `--decision-source file://...` is a local skeleton for future runtime decision delivery; manual `execute-action` remains debug/smoke only.
 - If Forge is unavailable, KLIQ keeps the last valid active assignment until it expires.
 - Expired runtime actions are reconciled even when assignment polling is degraded.
 - New runtime actions require a valid cached bundle and, in managed mode, a non-expired active assignment.
