@@ -38,6 +38,7 @@ func TestCompileAccessIntent(t *testing.T) {
 		filepath.Join(out, "signed", "access.protect-production-admin-access.runtime_bundle.signed.json"),
 		filepath.Join(out, "signed", "access.protect-production-admin-access.context_route_pack.signed.json"),
 		filepath.Join(out, "signed", "access.protect-production-admin-access.conformance_expectation.signed.json"),
+		filepath.Join(out, "signed", "access.protect-production-admin-access.policy_build_manifest.signed.json"),
 		filepath.Join(out, "reports", "access.protect-production-admin-access.manifest.json"),
 		filepath.Join(out, "reviews", "access.protect-production-admin-access.intent.review.md"),
 	} {
@@ -70,12 +71,28 @@ func TestCompileAccessIntent(t *testing.T) {
 	if manifest.Spec.SignedOutputs["runtime_bundle"].ArtifactRef.URI == "" {
 		t.Fatalf("expected signed runtime bundle ref in manifest, got %#v", manifest.Spec.SignedOutputs)
 	}
+	for adapterID, adapter := range manifest.Spec.Adapters {
+		if adapter.ManifestDigest == "" {
+			t.Fatalf("expected real adapter digest for %s, got %#v", adapterID, adapter)
+		}
+	}
 	verifier, err := signing.LoadDevLocalVerifier(filepath.Join(out, "keys", "dev-local.ed25519.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := kliqbundle.LoadSignedRuntimeBundle(context.Background(), results[0].RuntimeBundleSignedPath, verifier); err != nil {
 		t.Fatal(err)
+	}
+	manifestEnvelopeData, err := os.ReadFile(results[0].ManifestSignedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifestEnvelope signing.SignedEnvelope
+	if err := json.Unmarshal(manifestEnvelopeData, &manifestEnvelope); err != nil {
+		t.Fatal(err)
+	}
+	if result, err := verifier.Verify(context.Background(), manifestEnvelope); err != nil || !result.Valid {
+		t.Fatalf("expected signed policy build manifest to verify, result=%#v err=%v", result, err)
 	}
 }
 

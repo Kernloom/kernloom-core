@@ -114,3 +114,12 @@ func KLIQReadRoles() []string {
 		RoleReadOnlyViewer,
 	}
 }
+
+func PolicyBuildApproveRoles() []string {
+	return []string{
+		RolePolicyReviewer,
+		RoleSecurityOwner,
+		RolePlatformOwner,
+		RoleBreakGlassApprover,
+	}
+}

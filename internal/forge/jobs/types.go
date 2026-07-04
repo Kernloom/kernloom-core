@@ -69,6 +69,7 @@ type SimulationPolicyResult struct {
 	ContextRoutePackPath               string `json:"context_route_pack_path"`
 	ConformanceExpectationPath         string `json:"conformance_expectation_path"`
 	ManifestPath                       string `json:"manifest_path"`
+	ManifestSignedPath                 string `json:"manifest_signed_path,omitempty"`
 	CoveragePath                       string `json:"coverage_path"`
 	SimulationPath                     string `json:"simulation_path"`
 	ValidationPath                     string `json:"validation_path"`
@@ -81,6 +82,7 @@ type SimulationPolicyResult struct {
 	ContextRoutePackSHA256             string `json:"context_route_pack_sha256"`
 	ConformanceExpectationSHA256       string `json:"conformance_expectation_sha256"`
 	ManifestSHA256                     string `json:"manifest_sha256"`
+	ManifestSignedSHA256               string `json:"manifest_signed_sha256,omitempty"`
 	ResolvedSignedSHA256               string `json:"resolved_signed_sha256,omitempty"`
 	RuntimeBundleSignedSHA256          string `json:"runtime_bundle_signed_sha256,omitempty"`
 	ContextRoutePackSignedSHA256       string `json:"context_route_pack_signed_sha256,omitempty"`

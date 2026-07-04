@@ -4,7 +4,9 @@
 package api
 
 import (
+	"crypto/sha256"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -49,6 +51,7 @@ type enrollmentRequest struct {
 	TrustKeyID      string   `json:"trust_key_id,omitempty"`
 	PublicKeyPEM    string   `json:"public_key_pem,omitempty"`
 	CSRPEM          string   `json:"csr_pem,omitempty"`
+	SPIFFEID        string   `json:"spiffe_id,omitempty"`
 }
 
 type enrollmentResponse struct {
@@ -59,6 +62,21 @@ type enrollmentResponse struct {
 type serviceTokenRefreshResponse struct {
 	ServiceToken string    `json:"service_token"`
 	ExpiresAt    time.Time `json:"expires_at"`
+}
+
+type buildApprovalRequest struct {
+	BuildRef      coreartifact.Ref `json:"build_ref"`
+	Environment   string           `json:"environment"`
+	Stage         string           `json:"stage"`
+	Scope         string           `json:"scope"`
+	AuthorityID   string           `json:"authority_id,omitempty"`
+	AuthorityKind string           `json:"authority_kind,omitempty"`
+	ExpiresAt     *time.Time       `json:"expires_at,omitempty"`
+}
+
+type buildApprovalResponse struct {
+	ApprovedBuildRef coreartifact.Ref             `json:"approved_build_ref"`
+	Manifest         compiler.PolicyBuildManifest `json:"manifest"`
 }
 
 type assignmentPlanRequest struct {
@@ -73,6 +91,167 @@ type assignmentPlanRequest struct {
 
 type revocationRequest struct {
 	Reason string `json:"reason"`
+}
+
+func (s Server) approvePolicyBuildManifest(w http.ResponseWriter, r *http.Request, principal authn.Principal) {
+	if s.Artifacts == nil || s.ManagementSign == nil {
+		writeError(w, http.StatusInternalServerError, "build_approval_not_configured")
+		return
+	}
+	var req buildApprovalRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_json")
+		return
+	}
+	if strings.TrimSpace(req.BuildRef.URI) == "" || strings.TrimSpace(req.BuildRef.SHA256) == "" ||
+		strings.TrimSpace(req.Environment) == "" || strings.TrimSpace(req.Stage) == "" || strings.TrimSpace(req.Scope) == "" {
+		writeError(w, http.StatusBadRequest, "invalid_build_approval_request")
+		return
+	}
+	if err := s.Authorizer.Authorize(principal, authz.Request{
+		Action:       "policy_build_manifest.approve",
+		AllowedRoles: authz.PolicyBuildApproveRoles(),
+		Scope: authn.Scope{
+			Environment: strings.TrimSpace(req.Environment),
+			Stage:       strings.TrimSpace(req.Stage),
+		},
+	}); err != nil {
+		writeError(w, http.StatusForbidden, "forbidden")
+		return
+	}
+	payload, err := s.Artifacts.Get(r.Context(), req.BuildRef)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "build_manifest_unavailable")
+		return
+	}
+	payload, err = s.verifyApprovedBuildManifestEnvelope(r, payload)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	var manifest compiler.PolicyBuildManifest
+	if err := json.Unmarshal(payload, &manifest); err != nil {
+		writeError(w, http.StatusBadRequest, "build_manifest_invalid")
+		return
+	}
+	if manifest.Kind != "PolicyBuildManifest" {
+		writeError(w, http.StatusBadRequest, "build_manifest_invalid_kind")
+		return
+	}
+	if strings.TrimSpace(manifest.Approval.Status) != "pending_review" {
+		writeError(w, http.StatusBadRequest, "build_manifest_not_pending_review")
+		return
+	}
+	if err := validateBuildManifestApprovalReadiness(manifest); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	now := time.Now().UTC()
+	authorityID := strings.TrimSpace(req.AuthorityID)
+	if authorityID == "" {
+		authorityID = principal.Subject
+	}
+	authorityKind := strings.TrimSpace(req.AuthorityKind)
+	if authorityKind == "" {
+		authorityKind = "forge-api-approval"
+	}
+	manifest.Approval = compiler.ManifestApproval{
+		Status:        "approved",
+		ApprovedBy:    principal.Subject,
+		ApprovedAt:    now,
+		AuthorityID:   authorityID,
+		AuthorityKind: authorityKind,
+		Environment:   strings.TrimSpace(req.Environment),
+		Stage:         strings.TrimSpace(req.Stage),
+		Scope:         strings.TrimSpace(req.Scope),
+	}
+	approvedPayload, err := json.Marshal(manifest)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "build_manifest_marshal_failed")
+		return
+	}
+	expiresAt := now.Add(24 * time.Hour)
+	if req.ExpiresAt != nil {
+		expiresAt = req.ExpiresAt.UTC()
+	}
+	envelope, err := s.ManagementSign.Sign(r.Context(), approvedPayload, signing.Metadata{
+		SourceCommit: manifest.Spec.PolicyRepo.Commit,
+		ExpiresAt:    &expiresAt,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "build_manifest_signing_failed")
+		return
+	}
+	envelopePayload, err := json.Marshal(envelope)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "build_manifest_envelope_marshal_failed")
+		return
+	}
+	policyID := strings.TrimPrefix(manifest.Metadata.ID, "build.")
+	ref, err := s.Artifacts.Put(r.Context(), coreartifact.Artifact{
+		Metadata: coreartifact.Metadata{
+			ID:            "approved." + manifest.Metadata.ID,
+			PolicyID:      policyID,
+			ArtifactType:  "policy_build_manifest_signed_envelope",
+			SourceCommit:  manifest.Spec.PolicyRepo.Commit,
+			CorrelationID: manifest.Metadata.CorrelationID,
+			CreatedAt:     now,
+		},
+		Payload: envelopePayload,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "approved_build_manifest_store_failed")
+		return
+	}
+	if s.Management != nil {
+		_ = s.Management.SaveAuditEvent(r.Context(), domain.ManagementAuditEvent{
+			EventType:   "policy_build_manifest_approved",
+			Actor:       principal.Subject,
+			TargetType:  "policy_build_manifest",
+			TargetID:    manifest.Metadata.ID,
+			Environment: manifest.Approval.Environment,
+			Stage:       manifest.Approval.Stage,
+			Scope:       manifest.Approval.Scope,
+			Metadata: map[string]any{
+				"source_commit":      manifest.Spec.PolicyRepo.Commit,
+				"approved_build_ref": ref.URI,
+				"authority_id":       manifest.Approval.AuthorityID,
+				"authority_kind":     manifest.Approval.AuthorityKind,
+			},
+			CreatedAt: now,
+		})
+	}
+	writeJSON(w, http.StatusCreated, buildApprovalResponse{ApprovedBuildRef: ref, Manifest: manifest})
+}
+
+func validateBuildManifestApprovalReadiness(manifest compiler.PolicyBuildManifest) error {
+	if strings.TrimSpace(manifest.Metadata.ID) == "" {
+		return fmt.Errorf("build_manifest_missing_id")
+	}
+	if strings.TrimSpace(manifest.Spec.PolicyRepo.Commit) == "" {
+		return fmt.Errorf("build_manifest_missing_source_commit")
+	}
+	if manifest.Spec.CoreRegistry.ContentDigest == "" ||
+		manifest.Spec.EnterpriseRegistry.ContentDigest == "" ||
+		manifest.Spec.CatalogDigest == "" ||
+		manifest.Spec.Profile.Digest == "" ||
+		manifest.Spec.RiskRecipe.Digest == "" {
+		return fmt.Errorf("build_manifest_missing_provenance")
+	}
+	if len(manifest.Spec.SignedOutputs) == 0 {
+		return fmt.Errorf("build_manifest_missing_signed_outputs")
+	}
+	for artifactType, signed := range manifest.Spec.SignedOutputs {
+		if strings.TrimSpace(artifactType) == "" ||
+			strings.TrimSpace(signed.ArtifactRef.URI) == "" ||
+			strings.TrimSpace(signed.ArtifactRef.SHA256) == "" ||
+			strings.TrimSpace(signed.EnvelopeSHA256) == "" ||
+			strings.TrimSpace(signed.PayloadSHA256) == "" ||
+			strings.TrimSpace(signed.KeyID) == "" {
+			return fmt.Errorf("build_manifest_incomplete_signed_output")
+		}
+	}
+	return nil
 }
 
 func (s Server) createEnrollmentToken(w http.ResponseWriter, r *http.Request, principal authn.Principal) {
@@ -158,18 +337,26 @@ func (s Server) enrollKLIQ(w http.ResponseWriter, r *http.Request) {
 		trustKeyID = "dev-local"
 	}
 	kliqID := management.StableKLIQID(req.NodeID, req.Environment, req.Stage, req.Scope)
+	spiffeID := strings.TrimSpace(req.SPIFFEID)
+	if spiffeID == "" {
+		spiffeID = authn.DefaultKLIQSPIFFEID(kliqID, req.Environment, req.Stage, req.Scope)
+	}
 	identity := domain.KLIQIdentity{
-		IdentityID:   "kliq_identity." + kliqID,
-		KLIQID:       kliqID,
-		NodeID:       req.NodeID,
-		Environment:  req.Environment,
-		Stage:        req.Stage,
-		Scope:        req.Scope,
-		TrustKeyID:   trustKeyID,
-		PublicKeyPEM: strings.TrimSpace(req.PublicKeyPEM),
-		CSRPEM:       strings.TrimSpace(req.CSRPEM),
-		Status:       "active",
-		IssuedAt:     now,
+		IdentityID:              "kliq_identity." + kliqID,
+		KLIQID:                  kliqID,
+		NodeID:                  req.NodeID,
+		Environment:             req.Environment,
+		Stage:                   req.Stage,
+		Scope:                   req.Scope,
+		TrustKeyID:              trustKeyID,
+		PublicKeyPEM:            strings.TrimSpace(req.PublicKeyPEM),
+		CSRPEM:                  strings.TrimSpace(req.CSRPEM),
+		ServiceIdentityProvider: authn.ServiceIdentityProviderSPIFFEReady,
+		SPIFFEID:                spiffeID,
+		CredentialStatus:        "active",
+		CredentialExpiresAt:     now.Add(24 * time.Hour),
+		Status:                  "active",
+		IssuedAt:                now,
 	}
 	registration := domain.KLIQRegistration{
 		RegistrationID:    "kliq_registration." + kliqID,
@@ -197,7 +384,7 @@ func (s Server) enrollKLIQ(w http.ResponseWriter, r *http.Request) {
 	}
 	var serviceToken string
 	if s.KLIQService != nil {
-		token, err := s.KLIQService.Issue(kliqID, req.Environment, req.Stage, req.Scope, 24*time.Hour)
+		token, err := s.KLIQService.IssueForIdentity(identity, 24*time.Hour)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "service_token_issue_failed")
 			return
@@ -230,7 +417,7 @@ func (s Server) refreshKLIQServiceToken(w http.ResponseWriter, r *http.Request, 
 		writeError(w, http.StatusForbidden, "forbidden")
 		return
 	}
-	token, err := s.KLIQService.Issue(registration.KLIQID, registration.Environment, registration.Stage, registration.Scope, 24*time.Hour)
+	token, err := s.KLIQService.IssueForIdentity(registration.Identity, 24*time.Hour)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "service_token_issue_failed")
 		return
@@ -384,6 +571,10 @@ func (s Server) validateApprovedBuild(r *http.Request, registration domain.KLIQR
 	if err != nil {
 		return compiler.PolicyBuildManifest{}, fmt.Errorf("approved_build_unavailable")
 	}
+	payload, err = s.verifyApprovedBuildManifestEnvelope(r, payload)
+	if err != nil {
+		return compiler.PolicyBuildManifest{}, err
+	}
 	var manifest compiler.PolicyBuildManifest
 	if err := json.Unmarshal(payload, &manifest); err != nil {
 		return compiler.PolicyBuildManifest{}, fmt.Errorf("approved_build_invalid")
@@ -393,6 +584,9 @@ func (s Server) validateApprovedBuild(r *http.Request, registration domain.KLIQR
 	}
 	if manifest.Approval.Status != "approved" {
 		return compiler.PolicyBuildManifest{}, fmt.Errorf("approved_build_not_approved")
+	}
+	if err := validateApprovedBuildAuthority(manifest, registration); err != nil {
+		return compiler.PolicyBuildManifest{}, err
 	}
 	if strings.TrimSpace(manifest.Spec.PolicyRepo.Commit) != strings.TrimSpace(req.SourceCommit) {
 		return compiler.PolicyBuildManifest{}, fmt.Errorf("approved_build_source_commit_mismatch")
@@ -418,6 +612,57 @@ func (s Server) validateApprovedBuild(r *http.Request, registration domain.KLIQR
 	return manifest, nil
 }
 
+func (s Server) verifyApprovedBuildManifestEnvelope(r *http.Request, payload []byte) ([]byte, error) {
+	var envelope signing.SignedEnvelope
+	if err := json.Unmarshal(payload, &envelope); err != nil {
+		return nil, fmt.Errorf("approved_build_must_be_signed")
+	}
+	if envelope.Kind != "SignedEnvelope" || envelope.PayloadSHA256 == "" || len(envelope.Payload) == 0 {
+		return nil, fmt.Errorf("approved_build_must_be_signed")
+	}
+	verifier, ok := s.ManagementSign.(signing.Verifier)
+	if !ok {
+		return nil, fmt.Errorf("approved_build_verifier_unavailable")
+	}
+	result, err := verifier.Verify(r.Context(), envelope)
+	if err != nil {
+		return nil, fmt.Errorf("approved_build_signature_verification_failed")
+	}
+	if !result.Valid {
+		return nil, fmt.Errorf("approved_build_signature_invalid")
+	}
+	var header struct {
+		Kind string `json:"kind"`
+	}
+	if err := json.Unmarshal(envelope.Payload, &header); err != nil {
+		return nil, fmt.Errorf("approved_build_invalid")
+	}
+	if header.Kind != "PolicyBuildManifest" {
+		return nil, fmt.Errorf("approved_build_invalid_kind")
+	}
+	return envelope.Payload, nil
+}
+
+func validateApprovedBuildAuthority(manifest compiler.PolicyBuildManifest, registration domain.KLIQRegistration) error {
+	if strings.TrimSpace(manifest.Approval.ApprovedBy) == "" ||
+		manifest.Approval.ApprovedAt.IsZero() ||
+		strings.TrimSpace(manifest.Approval.AuthorityID) == "" ||
+		strings.TrimSpace(manifest.Approval.AuthorityKind) == "" {
+		return fmt.Errorf("approved_build_missing_approval_authority")
+	}
+	if strings.TrimSpace(manifest.Approval.Environment) == "" ||
+		strings.TrimSpace(manifest.Approval.Stage) == "" ||
+		strings.TrimSpace(manifest.Approval.Scope) == "" {
+		return fmt.Errorf("approved_build_missing_scope_binding")
+	}
+	if strings.TrimSpace(manifest.Approval.Environment) != strings.TrimSpace(registration.Environment) ||
+		strings.TrimSpace(manifest.Approval.Stage) != strings.TrimSpace(registration.Stage) ||
+		strings.TrimSpace(manifest.Approval.Scope) != strings.TrimSpace(registration.Scope) {
+		return fmt.Errorf("approved_build_scope_mismatch")
+	}
+	return nil
+}
+
 func validateArtifactInApprovedBuild(manifest compiler.PolicyBuildManifest, requested domain.KLIQAssignedArtifact) error {
 	artifactType := strings.TrimSpace(requested.ArtifactType)
 	ref := coreartifact.Ref{URI: strings.TrimSpace(requested.ArtifactRef), SHA256: strings.TrimSpace(requested.SHA256)}
@@ -425,7 +670,10 @@ func validateArtifactInApprovedBuild(manifest compiler.PolicyBuildManifest, requ
 		return fmt.Errorf("invalid_artifact_ref")
 	}
 	if signed, ok := manifest.Spec.SignedOutputs[artifactType]; ok {
-		if signed.ArtifactRef.URI == ref.URI && signed.ArtifactRef.SHA256 == ref.SHA256 {
+		if signed.ArtifactRef.URI == ref.URI &&
+			signed.ArtifactRef.SHA256 == ref.SHA256 &&
+			signed.EnvelopeSHA256 == ref.SHA256 &&
+			strings.TrimSpace(signed.KeyID) != "" {
 			return nil
 		}
 		return fmt.Errorf("artifact_not_in_approved_build")
@@ -543,8 +791,6 @@ func expectedAssignmentArtifactKind(artifactType string) string {
 		return "ConformanceExpectation"
 	case "adapter_assignment":
 		return "AdapterAssignment"
-	case "trust_bundle":
-		return "TrustBundle"
 	default:
 		return ""
 	}
@@ -878,8 +1124,18 @@ func (s Server) recordKLIQAuditUpload(w http.ResponseWriter, r *http.Request, pr
 		writeError(w, http.StatusBadRequest, "invalid_audit_upload")
 		return
 	}
+	if len(upload.Payload) > 0 && domain.SHA256JSON(upload.Payload) != upload.PayloadSHA256 {
+		writeError(w, http.StatusBadRequest, "audit_payload_hash_mismatch")
+		return
+	}
 	if upload.UploadedAt.IsZero() {
 		upload.UploadedAt = time.Now().UTC()
+	}
+	ack := domain.KLIQAuditUploadAck{
+		Status:        "accepted",
+		AuditRecordID: upload.AuditRecordID,
+		AckID:         "kliq_audit_ack." + shortAuditHash(upload.KLIQID+"\x00"+upload.AuditRecordID+"\x00"+upload.PayloadSHA256),
+		AckedAt:       upload.UploadedAt,
 	}
 	if err := s.Management.SaveAuditEvent(r.Context(), domain.ManagementAuditEvent{
 		EventType:   "kliq_audit_uploaded",
@@ -893,13 +1149,14 @@ func (s Server) recordKLIQAuditUpload(w http.ResponseWriter, r *http.Request, pr
 		Metadata: map[string]any{
 			"runtime_action_id": upload.RuntimeActionID,
 			"payload_sha256":    upload.PayloadSHA256,
+			"ack_id":            ack.AckID,
 		},
 		CreatedAt: upload.UploadedAt,
 	}); err != nil {
 		writeError(w, http.StatusBadRequest, "audit_upload_store_failed")
 		return
 	}
-	writeJSON(w, http.StatusAccepted, map[string]string{"status": "accepted"})
+	writeJSON(w, http.StatusAccepted, ack)
 }
 
 func (s Server) getKLIQStatusReport(w http.ResponseWriter, r *http.Request, principal authn.Principal) {
@@ -1041,6 +1298,21 @@ func authorizeKLIQServicePrincipal(principal authn.Principal, registration domai
 	if authn.PrincipalKLIQScope(principal) != "" && authn.PrincipalKLIQScope(principal) != registration.Scope {
 		return errors.New("kliq service scope mismatch")
 	}
+	if registration.Identity.ServiceIdentityProvider != "" &&
+		authn.PrincipalServiceIdentityProvider(principal) != "" &&
+		authn.PrincipalServiceIdentityProvider(principal) != registration.Identity.ServiceIdentityProvider {
+		return errors.New("kliq service identity provider mismatch")
+	}
+	if registration.Identity.SPIFFEID != "" &&
+		authn.PrincipalSPIFFEID(principal) != "" &&
+		authn.PrincipalSPIFFEID(principal) != registration.Identity.SPIFFEID {
+		return errors.New("kliq service spiffe id mismatch")
+	}
+	if expected := authn.IdentityMaterialSHA256(registration.Identity); expected != "" &&
+		authn.PrincipalIdentityMaterialSHA256(principal) != "" &&
+		authn.PrincipalIdentityMaterialSHA256(principal) != expected {
+		return errors.New("kliq service identity material mismatch")
+	}
 	return nil
 }
 
@@ -1065,9 +1337,19 @@ func decodeRevocationReason(r *http.Request) string {
 
 func defaultManagementProfile(kliqID string) domain.KLIQManagementProfile {
 	return domain.KLIQManagementProfile{
-		ProfileID:        "kliq_management_profile." + kliqID,
-		Mode:             "managed_pull",
-		PollInterval:     "1m",
-		AssignmentSource: "forge_assignment_api",
+		ProfileID:          "kliq_management_profile." + kliqID,
+		Mode:               "managed_pull",
+		PollInterval:       "1m",
+		HeartbeatInterval:  "30s",
+		StatusInterval:     "1m",
+		DecisionInterval:   "5s",
+		ReconcileInterval:  "30s",
+		AuditFlushInterval: "1m",
+		AssignmentSource:   "forge_assignment_api",
 	}
+}
+
+func shortAuditHash(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:])[:16]
 }

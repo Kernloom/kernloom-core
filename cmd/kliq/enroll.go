@@ -34,6 +34,7 @@ type enrollRequest struct {
 	Version         string   `json:"version"`
 	TrustKeyID      string   `json:"trust_key_id,omitempty"`
 	PublicKeyPEM    string   `json:"public_key_pem"`
+	SPIFFEID        string   `json:"spiffe_id,omitempty"`
 	Adapters        []string `json:"adapter_inventory,omitempty"`
 	Capabilities    []string `json:"capabilities,omitempty"`
 }
@@ -46,6 +47,7 @@ type enrollResponse struct {
 func enroll(args []string) {
 	fs := flag.NewFlagSet("kliq enroll", flag.ExitOnError)
 	forgeURL := fs.String("forge", "", "Forge API base URL")
+	devInsecureForgeTransport := fs.Bool("dev-insecure-forge-transport", false, "allow plaintext http Forge transport; dev/smoke only")
 	enrollmentToken := fs.String("enrollment-token", "", "single-use KLIQ enrollment token")
 	nodeID := fs.String("node-id", "", "local node id")
 	environment := fs.String("environment", "", "KLIQ environment")
@@ -70,7 +72,7 @@ func enroll(args []string) {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	response, err := requestEnrollment(context.Background(), *forgeURL, enrollRequest{
+	response, err := requestEnrollment(context.Background(), *forgeURL, *devInsecureForgeTransport, enrollRequest{
 		EnrollmentToken: *enrollmentToken,
 		NodeID:          *nodeID,
 		Environment:     *environment,
@@ -87,11 +89,19 @@ func enroll(args []string) {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	if response.Registration.KLIQID == "" || response.ServiceToken == "" {
-		fmt.Fprintln(os.Stderr, "forge enrollment response did not include kliq_id and service_token")
+	if response.Registration.KLIQID == "" {
+		fmt.Fprintln(os.Stderr, "forge enrollment response did not include kliq_id")
 		os.Exit(1)
 	}
-	tokenExpiresAt, err := serviceTokenExpiresAt(response.ServiceToken)
+	serviceToken := response.ServiceToken
+	if serviceToken == "" {
+		serviceToken, err = authn.IssueKLIQIdentitySignedToken(response.Registration.Identity, privateKeyPEM, 24*time.Hour, time.Now)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+	}
+	tokenExpiresAt, err := serviceTokenExpiresAt(serviceToken)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -104,19 +114,22 @@ func enroll(args []string) {
 	defer store.Close()
 	now := time.Now().UTC()
 	if err := store.SaveKLIQCredential(context.Background(), actionstate.KLIQCredential{
-		KLIQID:                response.Registration.KLIQID,
-		NodeID:                *nodeID,
-		Environment:           *environment,
-		Stage:                 *stage,
-		Scope:                 *scope,
-		TrustKeyID:            response.Registration.Identity.TrustKeyID,
-		AssignmentURL:         strings.TrimRight(*forgeURL, "/"),
-		PublicKeyPEM:          publicKeyPEM,
-		PrivateKeyPEM:         privateKeyPEM,
-		ServiceToken:          response.ServiceToken,
-		ServiceTokenExpiresAt: tokenExpiresAt,
-		CreatedAt:             now,
-		UpdatedAt:             now,
+		KLIQID:                  response.Registration.KLIQID,
+		NodeID:                  *nodeID,
+		Environment:             *environment,
+		Stage:                   *stage,
+		Scope:                   *scope,
+		TrustKeyID:              response.Registration.Identity.TrustKeyID,
+		AssignmentURL:           strings.TrimRight(*forgeURL, "/"),
+		PublicKeyPEM:            publicKeyPEM,
+		PrivateKeyPEM:           privateKeyPEM,
+		ServiceIdentityProvider: response.Registration.Identity.ServiceIdentityProvider,
+		SPIFFEID:                response.Registration.Identity.SPIFFEID,
+		CredentialStatus:        response.Registration.Identity.CredentialStatus,
+		ServiceToken:            serviceToken,
+		ServiceTokenExpiresAt:   tokenExpiresAt,
+		CreatedAt:               now,
+		UpdatedAt:               now,
 	}); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -128,7 +141,10 @@ func enroll(args []string) {
 	fmt.Printf("  service_token_expires_at: %s\n", tokenExpiresAt.Format(time.RFC3339))
 }
 
-func requestEnrollment(ctx context.Context, forgeURL string, req enrollRequest) (enrollResponse, error) {
+func requestEnrollment(ctx context.Context, forgeURL string, allowDevInsecureTransport bool, req enrollRequest) (enrollResponse, error) {
+	if err := validateSecureForgeURL(forgeURL, allowDevInsecureTransport); err != nil {
+		return enrollResponse{}, err
+	}
 	data, err := json.Marshal(req)
 	if err != nil {
 		return enrollResponse{}, err
@@ -174,7 +190,7 @@ func generateLocalIdentityPEM() (string, string, error) {
 }
 
 func serviceTokenExpiresAt(token string) (time.Time, error) {
-	if !strings.HasPrefix(token, "kliqsvc.") {
+	if !strings.HasPrefix(token, "kliqsvc.") && !strings.HasPrefix(token, "kliqsig.") {
 		return time.Time{}, fmt.Errorf("unsupported kliq service token format")
 	}
 	parts := strings.Split(token, ".")

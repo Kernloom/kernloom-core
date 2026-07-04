@@ -243,7 +243,7 @@ func TestAuditSpoolMarksUploadedAndFailed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(pending) != 1 || pending[0].RetryCount != 1 || pending[0].LastError != "forge unavailable" {
+	if len(pending) != 1 || pending[0].RetryCount != 1 || pending[0].LastError != "forge unavailable" || pending[0].PayloadSHA256 == "" {
 		t.Fatalf("expected failed audit to remain pending with retry metadata, got %#v", pending)
 	}
 	if err := store.MarkAuditUploaded(ctx, "audit_spool.upload", now.Add(2*time.Minute)); err != nil {
@@ -255,6 +255,34 @@ func TestAuditSpoolMarksUploadedAndFailed(t *testing.T) {
 	}
 	if len(pending) != 0 {
 		t.Fatalf("expected uploaded audit to leave pending set, got %#v", pending)
+	}
+}
+
+func TestAuditExportDefaultsToRedactedRecords(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "state.db")
+	store, err := actionstate.OpenSQLite(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Date(2026, 7, 4, 12, 0, 0, 0, time.UTC)
+	if err := store.AppendAudit(context.Background(), actionstate.AuditRecord{
+		ID:              "audit_spool.export",
+		RuntimeActionID: "runtime_action.export",
+		Status:          kliqruntime.AuditPendingUpload,
+		Payload:         `{"secret":"secret-token"}`,
+		CreatedAt:       now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(t.TempDir(), "audit-export.json")
+	auditExportCmd([]string{"--state", statePath, "--output", output})
+	data, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "secret-token") || !strings.Contains(string(data), `"redacted": true`) {
+		t.Fatalf("expected redacted audit export, got %s", string(data))
 	}
 }
 

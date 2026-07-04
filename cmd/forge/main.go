@@ -15,6 +15,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/kernloom/kernloom-core/internal/api/authn"
@@ -39,9 +40,14 @@ func main() {
 		api(os.Args[2:])
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "migrate" {
+		migrate(os.Args[2:])
+		return
+	}
 	fmt.Println(version.Binary("forge"))
 	fmt.Println("usage: forge compile [--policy-repo path] [--policy-file path] [--core-registry path] [--enterprise-registry path] [--output-dir path] [--artifact-store-root path] [--signing dev-local|none]")
 	fmt.Println("usage: forge api [--addr :8080] [--queue redis|memory] [--redis-addr 127.0.0.1:6379]")
+	fmt.Println("usage: forge migrate --management-postgres-dsn postgres://...")
 }
 
 func compile(args []string) {
@@ -80,7 +86,37 @@ func compile(args []string) {
 			fmt.Printf("  signed_runtime_bundle: %s\n", result.RuntimeBundleSignedPath)
 		}
 		fmt.Printf("  manifest: %s\n", result.ManifestPath)
+		if result.ManifestSignedPath != "" {
+			fmt.Printf("  signed_manifest: %s\n", result.ManifestSignedPath)
+			fmt.Printf("  signed_manifest_ref: %s %s\n", result.ManifestSignedArtifactRef.URI, result.ManifestSignedArtifactRef.SHA256)
+		}
 	}
+}
+
+func migrate(args []string) {
+	fs := flag.NewFlagSet("forge migrate", flag.ExitOnError)
+	managementPostgresDSN := fs.String("management-postgres-dsn", "", "Postgres DSN for KLIQ management migrations")
+	if err := fs.Parse(args); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	if *managementPostgresDSN == "" {
+		fmt.Fprintln(os.Stderr, "forge migrate requires --management-postgres-dsn")
+		os.Exit(2)
+	}
+	store, err := management.OpenPostgres(context.Background(), *managementPostgresDSN)
+	if err != nil {
+		logger.Error("forge_migrate_failed", "error", err.Error())
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := store.Close(); err != nil {
+		logger.Error("forge_migrate_close_failed", "error", err.Error())
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	logger.Info("forge_migrate_complete", "management_store", "postgres")
+	fmt.Println("forge management migrations applied")
 }
 
 func api(args []string) {
@@ -97,7 +133,10 @@ func api(args []string) {
 	managementStoreKind := fs.String("management-store", "postgres", "KLIQ management store backend: postgres or memory")
 	managementPostgresDSN := fs.String("management-postgres-dsn", "", "Postgres DSN for KLIQ management store")
 	devManagement := fs.Bool("dev-management", false, "enable explicit dev-only in-memory management store and manual assignment API")
-	kliqServiceTokenSecret := fs.String("kliq-service-token-secret", "", "HMAC secret for dev/local KLIQ service tokens; production should replace with mTLS-ready identity")
+	devSeedManagementTrust := fs.Bool("dev-seed-management-trust", false, "explicitly seed missing management trust bundle from the dev-local signer; never use in production")
+	kliqServiceTokenSecret := fs.String("kliq-service-token-secret", "", "dev-only HMAC secret for KLIQ service tokens; requires --dev-allow-cli-kliq-service-token-secret")
+	kliqServiceTokenSecretFile := fs.String("kliq-service-token-secret-file", "", "file containing HMAC secret for KLIQ service tokens")
+	devAllowCLIKLIQServiceTokenSecret := fs.Bool("dev-allow-cli-kliq-service-token-secret", false, "allow KLIQ service-token HMAC secret via argv; dev/risk-accepted only")
 	artifactStoreRoot := fs.String("artifact-store-root", "../enterprise-kernloom-policies/generated/artifact-store", "fs artifact store root for approved Forge artifacts")
 	artifactStoreOrg := fs.String("artifact-store-org", "kernloom", "artifact store organization path segment")
 	artifactStoreEnvironment := fs.String("artifact-store-env", "dev", "artifact store environment path segment")
@@ -136,17 +175,24 @@ func api(args []string) {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
-	if err := seedManagementTrustBundle(managementBackend, managementSigner); err != nil {
+	if err := validateOrSeedManagementTrustBundle(managementBackend, managementSigner, *devSeedManagementTrust); err != nil {
 		logger.Error("forge_management_trust_bundle_failed", "error", err.Error())
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
+	if *devSeedManagementTrust {
+		logger.Warn("forge_management_trust_seed_enabled", "message", "management trust bootstrap from local signer is explicit dev-only behavior")
+	}
+	authenticator = append(authenticator, authn.KLIQIdentityTokenVerifier{Store: managementBackend})
 	var kliqService *authn.KLIQServiceTokenIssuer
-	if *kliqServiceTokenSecret != "" {
-		kliqService = &authn.KLIQServiceTokenIssuer{Secret: []byte(*kliqServiceTokenSecret)}
-	} else if *managementStoreKind == "postgres" {
-		fmt.Fprintln(os.Stderr, "forge api production management requires --kliq-service-token-secret until mTLS service auth is wired")
+	kliqSecret, err := loadKLIQServiceTokenSecret(*kliqServiceTokenSecret, *kliqServiceTokenSecretFile, *devAllowCLIKLIQServiceTokenSecret)
+	if err != nil {
+		logger.Error("forge_kliq_service_token_secret_failed", "error", err.Error())
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
+	}
+	if len(kliqSecret) != 0 {
+		kliqService = &authn.KLIQServiceTokenIssuer{Secret: kliqSecret}
 	}
 	if kliqService != nil {
 		authenticator = append(authenticator, kliqService)
@@ -166,6 +212,29 @@ func api(args []string) {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+func loadKLIQServiceTokenSecret(flagValue, filePath string, allowCLI bool) ([]byte, error) {
+	flagValue = strings.TrimSpace(flagValue)
+	filePath = strings.TrimSpace(filePath)
+	envValue := strings.TrimSpace(os.Getenv("KERNLOOM_KLIQ_SERVICE_TOKEN_SECRET"))
+	if flagValue != "" && !allowCLI {
+		return nil, fmt.Errorf("--kliq-service-token-secret exposes secrets via process argv; use --kliq-service-token-secret-file or KERNLOOM_KLIQ_SERVICE_TOKEN_SECRET, or pass --dev-allow-cli-kliq-service-token-secret for local smoke tests")
+	}
+	if filePath != "" {
+		data, err := os.ReadFile(filePath)
+		if err != nil {
+			return nil, err
+		}
+		return []byte(strings.TrimSpace(string(data))), nil
+	}
+	if envValue != "" {
+		return []byte(envValue), nil
+	}
+	if flagValue != "" {
+		return []byte(flagValue), nil
+	}
+	return nil, nil
 }
 
 func authenticator(enableDevTokens bool, issuer, audience, hmacSecret, rsaPublicKeyPath string) (authn.Chain, error) {
@@ -239,7 +308,7 @@ func managementStore(kind, postgresDSN string, devManagement bool) (management.S
 	}
 }
 
-func seedManagementTrustBundle(store management.Store, signer *signing.DevLocalSigner) error {
+func validateOrSeedManagementTrustBundle(store management.Store, signer *signing.DevLocalSigner, allowDevSeed bool) error {
 	if signer == nil {
 		return nil
 	}
@@ -248,6 +317,9 @@ func seedManagementTrustBundle(store management.Store, signer *signing.DevLocalS
 	if err == nil {
 		if existing.PublicKey != publicKey {
 			return fmt.Errorf("existing management trust bundle %q public key does not match signing key", signer.KeyID)
+		}
+		if existing.Purpose != "assignment_verification" {
+			return fmt.Errorf("existing management trust bundle %q has purpose %q, expected assignment_verification", signer.KeyID, existing.Purpose)
 		}
 		if existing.Status != "active" && existing.Status != "previous" {
 			return fmt.Errorf("existing management trust bundle %q is %q", signer.KeyID, existing.Status)
@@ -260,11 +332,14 @@ func seedManagementTrustBundle(store management.Store, signer *signing.DevLocalS
 	if err != nil && !errors.Is(err, management.ErrNotFound) {
 		return err
 	}
+	if !allowDevSeed {
+		return fmt.Errorf("management trust bundle %q is not provisioned; use explicit trust provisioning or --dev-seed-management-trust for local smoke tests", signer.KeyID)
+	}
 	expiresAt := time.Now().UTC().Add(24 * time.Hour)
 	return store.SaveTrustBundle(context.Background(), domain.TrustBundle{
 		KeyID:     signer.KeyID,
 		PublicKey: publicKey,
-		Purpose:   "kliq_assignment",
+		Purpose:   "assignment_verification",
 		Status:    "active",
 		ExpiresAt: expiresAt,
 		Issuer:    "forge-management-dev-local",

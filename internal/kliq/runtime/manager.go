@@ -15,6 +15,8 @@ import (
 	"time"
 
 	corebundle "github.com/kernloom/kernloom-core/internal/core/bundle"
+	"github.com/kernloom/kernloom-core/internal/core/conformance"
+	corecontext "github.com/kernloom/kernloom-core/internal/core/context"
 	"github.com/kernloom/kernloom-core/internal/core/domain"
 	"github.com/kernloom/kernloom-core/internal/core/signing"
 	"github.com/kernloom/kernloom-core/internal/kliq/actionstate"
@@ -37,6 +39,8 @@ type managedActivationStore interface {
 
 type ExecuteRequest struct {
 	DecisionID                  string `json:"decision_id"`
+	EventType                   string `json:"event_type,omitempty"`
+	EventID                     string `json:"event_id,omitempty"`
 	AdapterID                   string `json:"adapter_id"`
 	CapabilityID                string `json:"capability_id"`
 	CapabilityGrantID           string `json:"capability_grant_id"`
@@ -118,7 +122,11 @@ func (m Manager) LoadManagedBundle(ctx context.Context, source *kliqbundle.Manag
 	if !ok {
 		return actionstate.BundleRecord{}, fmt.Errorf("managed assignment source did not expose activated assignment state")
 	}
-	stagedArtifacts := assignmentArtifactRecords(activation, source.AssignmentArtifacts(), m.now())
+	artifacts := source.AssignmentArtifacts()
+	if err := validateManagedAssignmentArtifacts(artifacts, m.now()); err != nil {
+		return actionstate.BundleRecord{}, err
+	}
+	stagedArtifacts := assignmentArtifactRecords(activation, artifacts, m.now())
 	state := actionstate.KLIQManagementState{
 		KLIQID:                       activation.KLIQID,
 		ActiveAssignmentID:           activation.AssignmentID,
@@ -165,10 +173,8 @@ func assignmentArtifactRecords(activation kliqbundle.ManagedAssignmentActivation
 
 func assignmentArtifactActivationStatus(artifactType string) string {
 	switch artifactType {
-	case "runtime_bundle":
+	case "runtime_bundle", "adapter_assignment", "context_route_pack", "conformance_expectation", "trust_bundle", "management_profile", "fallback_profile":
 		return "activated"
-	case "adapter_assignment", "context_route_pack", "conformance_expectation", "trust_bundle", "management_profile", "fallback_profile":
-		return "validated_staged"
 	default:
 		return "unknown"
 	}
@@ -179,20 +185,238 @@ func assignmentArtifactActivationMessage(artifactType string) string {
 	case "runtime_bundle":
 		return "runtime bundle verified and active"
 	case "adapter_assignment":
-		return "adapter assignment staged; daemon registry activation runs after bundle activation"
+		return "adapter assignment validated and available for daemon registry activation"
 	case "context_route_pack":
-		return "context route pack staged for future context projection activation"
+		return "context route pack validated and active for local context routing"
 	case "conformance_expectation":
-		return "conformance expectation staged for future evidence activation"
+		return "conformance expectation validated and active for local evidence expectations"
 	case "trust_bundle":
-		return "trust bundle artifact staged; local trust bundle file remains current verifier source"
+		return "trust bundle validated and active in assignment artifact state"
 	case "management_profile":
-		return "management profile staged for future runtime loop configuration"
+		return "management profile validated and available for daemon interval control"
 	case "fallback_profile":
-		return "fallback profile staged for future failure policy activation"
+		return "fallback profile validated and active for local fallback behavior"
 	default:
 		return "artifact type not recognized by activation status mapper"
 	}
+}
+
+func validateManagedAssignmentArtifacts(artifacts []domain.KLIQAssignedArtifact, now time.Time) error {
+	seenRuntimeBundle := false
+	for _, artifact := range artifacts {
+		payload, err := assignmentArtifactPayload(artifact)
+		if err != nil {
+			return fmt.Errorf("assignment artifact %q payload unavailable: %w", artifact.ArtifactID, err)
+		}
+		switch artifact.ArtifactType {
+		case "runtime_bundle":
+			seenRuntimeBundle = true
+			if err := validateRuntimeBundleArtifact(payload); err != nil {
+				return fmt.Errorf("runtime bundle artifact %q invalid: %w", artifact.ArtifactID, err)
+			}
+		case "adapter_assignment":
+			if err := validateAdapterAssignmentArtifact(payload); err != nil {
+				return fmt.Errorf("adapter assignment artifact %q invalid: %w", artifact.ArtifactID, err)
+			}
+		case "context_route_pack":
+			if err := validateContextRoutePackArtifact(payload); err != nil {
+				return fmt.Errorf("context route pack artifact %q invalid: %w", artifact.ArtifactID, err)
+			}
+		case "conformance_expectation":
+			if err := validateConformanceExpectationArtifact(payload); err != nil {
+				return fmt.Errorf("conformance expectation artifact %q invalid: %w", artifact.ArtifactID, err)
+			}
+		case "trust_bundle":
+			if err := validateTrustBundleArtifact(payload, now); err != nil {
+				return fmt.Errorf("trust bundle artifact %q invalid: %w", artifact.ArtifactID, err)
+			}
+		case "management_profile":
+			if err := validateManagementProfileArtifact(payload); err != nil {
+				return fmt.Errorf("management profile artifact %q invalid: %w", artifact.ArtifactID, err)
+			}
+		case "fallback_profile":
+			if err := validateFallbackProfileArtifact(payload); err != nil {
+				return fmt.Errorf("fallback profile artifact %q invalid: %w", artifact.ArtifactID, err)
+			}
+		default:
+			return fmt.Errorf("unsupported assignment artifact type %q", artifact.ArtifactType)
+		}
+	}
+	if !seenRuntimeBundle {
+		return fmt.Errorf("managed assignment requires runtime_bundle artifact")
+	}
+	return nil
+}
+
+func assignmentArtifactPayload(artifact domain.KLIQAssignedArtifact) ([]byte, error) {
+	var envelope signing.SignedEnvelope
+	if err := json.Unmarshal(artifact.Envelope, &envelope); err != nil {
+		return nil, err
+	}
+	if len(envelope.Payload) == 0 {
+		return nil, fmt.Errorf("signed envelope payload is empty")
+	}
+	return envelope.Payload, nil
+}
+
+func validateRuntimeBundleArtifact(payload []byte) error {
+	var bundle corebundle.RuntimeBundle
+	if err := json.Unmarshal(payload, &bundle); err != nil {
+		return err
+	}
+	switch {
+	case bundle.Kind != "RuntimeBundle":
+		return fmt.Errorf("kind must be RuntimeBundle")
+	case strings.TrimSpace(bundle.Metadata.ID) == "":
+		return fmt.Errorf("metadata.id is required")
+	case strings.TrimSpace(bundle.Metadata.PolicyID) == "":
+		return fmt.Errorf("metadata.policy_id is required")
+	case strings.TrimSpace(bundle.Spec.PolicyID) == "":
+		return fmt.Errorf("spec.policy_id is required")
+	}
+	return nil
+}
+
+func validateAdapterAssignmentArtifact(payload []byte) error {
+	var assignment domain.AdapterAssignment
+	if err := json.Unmarshal(payload, &assignment); err != nil {
+		return err
+	}
+	switch {
+	case assignment.Kind != "AdapterAssignment":
+		return fmt.Errorf("kind must be AdapterAssignment")
+	case strings.TrimSpace(assignment.AdapterID) == "":
+		return fmt.Errorf("adapter_id is required")
+	case strings.TrimSpace(assignment.Endpoint) == "":
+		return fmt.Errorf("endpoint is required")
+	}
+	return nil
+}
+
+func validateContextRoutePackArtifact(payload []byte) error {
+	var pack corecontext.ContextRoutePack
+	if err := json.Unmarshal(payload, &pack); err != nil {
+		return err
+	}
+	switch {
+	case pack.Kind != "ContextRoutePack":
+		return fmt.Errorf("kind must be ContextRoutePack")
+	case strings.TrimSpace(pack.Spec.PolicyID) == "":
+		return fmt.Errorf("spec.policy_id is required")
+	case strings.TrimSpace(pack.Spec.Target) == "":
+		return fmt.Errorf("spec.target is required")
+	case strings.TrimSpace(pack.Spec.Stage) == "":
+		return fmt.Errorf("spec.stage is required")
+	case len(pack.Spec.Routes) == 0:
+		return fmt.Errorf("spec.routes is required")
+	}
+	for _, route := range pack.Spec.Routes {
+		if strings.TrimSpace(route.Name) == "" {
+			return fmt.Errorf("route.name is required")
+		}
+	}
+	return nil
+}
+
+func validateConformanceExpectationArtifact(payload []byte) error {
+	var expectation conformance.ConformanceExpectation
+	if err := json.Unmarshal(payload, &expectation); err != nil {
+		return err
+	}
+	switch {
+	case expectation.Kind != "ConformanceExpectation":
+		return fmt.Errorf("kind must be ConformanceExpectation")
+	case strings.TrimSpace(expectation.Spec.PolicyID) == "":
+		return fmt.Errorf("spec.policy_id is required")
+	case strings.TrimSpace(expectation.Spec.Target) == "":
+		return fmt.Errorf("spec.target is required")
+	case strings.TrimSpace(expectation.Spec.Stage) == "":
+		return fmt.Errorf("spec.stage is required")
+	case len(expectation.Spec.Expectations) == 0 && len(expectation.Spec.Prohibit) == 0:
+		return fmt.Errorf("spec.expectations or spec.prohibit is required")
+	}
+	return nil
+}
+
+func validateTrustBundleArtifact(payload []byte, now time.Time) error {
+	var bundle domain.TrustBundle
+	if err := json.Unmarshal(payload, &bundle); err != nil {
+		return err
+	}
+	switch {
+	case strings.TrimSpace(bundle.KeyID) == "":
+		return fmt.Errorf("key_id is required")
+	case strings.TrimSpace(bundle.PublicKey) == "":
+		return fmt.Errorf("public_key is required")
+	case !validTrustBundlePurpose(bundle.Purpose):
+		return fmt.Errorf("unsupported trust bundle purpose %q", bundle.Purpose)
+	case bundle.Status != "active" && bundle.Status != "previous":
+		return fmt.Errorf("trust bundle status %q cannot verify managed assignments", bundle.Status)
+	case !bundle.ExpiresAt.IsZero() && !now.UTC().Before(bundle.ExpiresAt.UTC()):
+		return fmt.Errorf("trust bundle is expired")
+	}
+	return nil
+}
+
+func validTrustBundlePurpose(purpose string) bool {
+	switch strings.TrimSpace(purpose) {
+	case "assignment_verification", "artifact_verification":
+		return true
+	default:
+		return false
+	}
+}
+
+func validateManagementProfileArtifact(payload []byte) error {
+	var profile domain.KLIQManagementProfile
+	if err := json.Unmarshal(payload, &profile); err != nil {
+		return err
+	}
+	if profile.Kind != "" && profile.Kind != "KLIQManagementProfile" && profile.Kind != "ManagementProfile" {
+		return fmt.Errorf("unsupported management profile kind %q", profile.Kind)
+	}
+	if strings.TrimSpace(profile.ProfileID) == "" {
+		return fmt.Errorf("profile_id is required")
+	}
+	if strings.TrimSpace(profile.Mode) == "" {
+		return fmt.Errorf("mode is required")
+	}
+	for name, value := range map[string]string{
+		"poll_interval":        profile.PollInterval,
+		"heartbeat_interval":   profile.HeartbeatInterval,
+		"status_interval":      profile.StatusInterval,
+		"decision_interval":    profile.DecisionInterval,
+		"reconcile_interval":   profile.ReconcileInterval,
+		"audit_flush_interval": profile.AuditFlushInterval,
+	} {
+		if strings.TrimSpace(value) == "" {
+			continue
+		}
+		if _, err := parsePositiveDuration(value, name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateFallbackProfileArtifact(payload []byte) error {
+	var profile domain.KLIQFallbackProfile
+	if err := json.Unmarshal(payload, &profile); err != nil {
+		return err
+	}
+	if profile.Kind != "" && profile.Kind != "KLIQFallbackProfile" && profile.Kind != "FallbackProfile" {
+		return fmt.Errorf("unsupported fallback profile kind %q", profile.Kind)
+	}
+	if strings.TrimSpace(profile.ProfileID) == "" {
+		return fmt.Errorf("profile_id is required")
+	}
+	if strings.TrimSpace(profile.Mode) == "" {
+		return fmt.Errorf("mode is required")
+	}
+	if !profile.AuditRequired {
+		return fmt.Errorf("audit_required must be true")
+	}
+	return nil
 }
 
 func (m Manager) loadBundle(ctx context.Context, source kliqbundle.Source) (actionstate.BundleRecord, error) {
@@ -282,6 +506,9 @@ func (m Manager) ExecutePlan(ctx context.Context, plan RuntimeActionPlan, signed
 	if err != nil {
 		return ExecuteResult{}, err
 	}
+	if err := m.Store.AppendRuntimeDecision(ctx, runtimeDecisionRecord(plan, result, m.now())); err != nil {
+		return ExecuteResult{}, err
+	}
 	return ExecuteResult{Plan: plan, Results: []RuntimeActionExecutionResult{result}}, nil
 }
 
@@ -327,6 +554,9 @@ func (m Manager) planFromRequest(ctx context.Context, req ExecuteRequest) (Runti
 	if err := m.ensureActiveAssignmentAllowsNewActions(ctx); err != nil {
 		return RuntimeActionPlan{}, nil, err
 	}
+	if err := m.ensureActiveContextRouteAllowsAction(ctx, adapterID, capabilityID); err != nil {
+		return RuntimeActionPlan{}, nil, err
+	}
 	runtimeBundle := verified.Bundle
 	if !runtimeBundle.Spec.RuntimeAllowed {
 		return RuntimeActionPlan{}, nil, fmt.Errorf("runtime bundle %q does not allow runtime actions", runtimeBundle.Metadata.ID)
@@ -367,6 +597,9 @@ func (m Manager) planFromRequest(ctx context.Context, req ExecuteRequest) (Runti
 	if targetKey == "" {
 		return RuntimeActionPlan{}, nil, fmt.Errorf("target key is required")
 	}
+	if err := validateCapabilityGrant(runtimeBundle, adapterID, capabilityID, actionType, targetScope, capabilityGrantID, ttl, m.now()); err != nil {
+		return RuntimeActionPlan{}, nil, err
+	}
 	correlationID := strings.TrimSpace(req.CorrelationID)
 	if correlationID == "" {
 		correlationID = strings.TrimSpace(runtimeBundle.Metadata.CorrelationID)
@@ -379,6 +612,8 @@ func (m Manager) planFromRequest(ctx context.Context, req ExecuteRequest) (Runti
 	plan := RuntimeActionPlan{
 		PlanID:        planID,
 		DecisionID:    decisionID,
+		EventType:     strings.TrimSpace(req.EventType),
+		EventID:       strings.TrimSpace(req.EventID),
 		BundleID:      runtimeBundle.Metadata.ID,
 		PolicyID:      runtimeBundle.Metadata.PolicyID,
 		SourceCommit:  runtimeBundle.Metadata.SourceCommit,
@@ -409,6 +644,44 @@ func (m Manager) planFromRequest(ctx context.Context, req ExecuteRequest) (Runti
 	return plan, bundleRecord.EnvelopeJSON, nil
 }
 
+func runtimeDecisionRecord(plan RuntimeActionPlan, result RuntimeActionExecutionResult, now time.Time) actionstate.RuntimeDecisionRecord {
+	status := "planned"
+	activatedAction := ""
+	if result.Applied {
+		status = "executed"
+		activatedAction = result.Lease.RuntimeActionID
+	} else if result.Message != "" {
+		status = "deduplicated"
+		activatedAction = result.Lease.RuntimeActionID
+	}
+	data, _ := json.Marshal(map[string]any{
+		"decision_id":      plan.DecisionID,
+		"event_type":       plan.EventType,
+		"event_id":         plan.EventID,
+		"plan_id":          plan.PlanID,
+		"bundle_id":        plan.BundleID,
+		"policy_id":        plan.PolicyID,
+		"source_commit":    plan.SourceCommit,
+		"correlation_id":   plan.CorrelationID,
+		"activated_action": activatedAction,
+		"status":           status,
+	})
+	return actionstate.RuntimeDecisionRecord{
+		DecisionID:      plan.DecisionID,
+		PlanID:          plan.PlanID,
+		PolicyID:        plan.PolicyID,
+		BundleID:        plan.BundleID,
+		SourceCommit:    plan.SourceCommit,
+		CorrelationID:   plan.CorrelationID,
+		EventType:       plan.EventType,
+		EventID:         plan.EventID,
+		Status:          status,
+		PayloadSHA256:   domain.SHA256JSON(data),
+		CreatedAt:       now.UTC(),
+		ActivatedAction: activatedAction,
+	}
+}
+
 func (m Manager) ensureActiveAssignmentAllowsNewActions(ctx context.Context) error {
 	credential, err := m.Store.KLIQCredential(ctx)
 	if errors.Is(err, actionstate.ErrNotFound) {
@@ -430,8 +703,110 @@ func (m Manager) ensureActiveAssignmentAllowsNewActions(ctx context.Context) err
 	return nil
 }
 
+func (m Manager) ensureActiveContextRouteAllowsAction(ctx context.Context, adapterID, capabilityID string) error {
+	credential, err := m.Store.KLIQCredential(ctx)
+	if errors.Is(err, actionstate.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	record, err := m.Store.ActiveArtifact(ctx, credential.KLIQID, "context_route_pack")
+	if errors.Is(err, actionstate.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var pack corecontext.ContextRoutePack
+	if err := json.Unmarshal(record.PayloadJSON, &pack); err != nil {
+		return err
+	}
+	for _, route := range pack.Spec.Routes {
+		if routeAllowsConsumer(route.Consumers, adapterID, capabilityID) {
+			return nil
+		}
+	}
+	return fmt.Errorf("active context route pack %q does not allow adapter %q capability %q", record.ArtifactID, adapterID, capabilityID)
+}
+
+func routeAllowsConsumer(consumers []string, adapterID, capabilityID string) bool {
+	for _, consumer := range consumers {
+		switch strings.TrimSpace(consumer) {
+		case "*", adapterID, capabilityID:
+			return true
+		}
+	}
+	return false
+}
+
+func (m Manager) ensureActiveFallbackAllowsExecution(ctx context.Context) error {
+	credential, err := m.Store.KLIQCredential(ctx)
+	if errors.Is(err, actionstate.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	record, err := m.Store.ActiveArtifact(ctx, credential.KLIQID, "fallback_profile")
+	if errors.Is(err, actionstate.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var profile domain.KLIQFallbackProfile
+	if err := json.Unmarshal(record.PayloadJSON, &profile); err != nil {
+		return err
+	}
+	if !profile.AuditRequired {
+		return fmt.Errorf("active fallback profile %q disables required audit; denying runtime action", profile.ProfileID)
+	}
+	if !profile.DenyNewActionsWhenDegraded {
+		return nil
+	}
+	pending, err := m.Store.PendingAudits(ctx)
+	if err != nil {
+		return fmt.Errorf("audit spool unavailable under fallback profile %q: %w", profile.ProfileID, err)
+	}
+	for _, record := range pending {
+		if record.RetryCount > 0 || record.LastError != "" {
+			return fmt.Errorf("active fallback profile %q denies new runtime actions while audit spool is degraded", profile.ProfileID)
+		}
+	}
+	return nil
+}
+
+func (m Manager) appendActiveConformanceExpectationAudit(ctx context.Context, lease actionstate.RuntimeActionLease, now time.Time) error {
+	credential, err := m.Store.KLIQCredential(ctx)
+	if errors.Is(err, actionstate.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	record, err := m.Store.ActiveArtifact(ctx, credential.KLIQID, "conformance_expectation")
+	if errors.Is(err, actionstate.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var expectation conformance.ConformanceExpectation
+	if err := json.Unmarshal(record.PayloadJSON, &expectation); err != nil {
+		return err
+	}
+	if len(expectation.Spec.Expectations) == 0 && len(expectation.Spec.Prohibit) == 0 {
+		return nil
+	}
+	return m.Store.AppendAudit(ctx, audit(lease, "conformance expectations active for runtime action", now))
+}
+
 func (m Manager) executePlannedAction(ctx context.Context, plan RuntimeActionPlan, action PlannedRuntimeAction, executor RuntimeExecutor, signedBundle []byte) (RuntimeActionExecutionResult, error) {
 	now := m.now()
+	if err := m.ensureActiveFallbackAllowsExecution(ctx); err != nil {
+		return RuntimeActionExecutionResult{}, err
+	}
 	existing, err := m.Store.LeaseByDedupKey(ctx, action.AdapterID, action.CapabilityID, action.ActionType, action.TargetScope, action.TargetKey)
 	switch {
 	case err == nil && now.Before(existing.ExpiresAt):
@@ -446,6 +821,12 @@ func (m Manager) executePlannedAction(ctx context.Context, plan RuntimeActionPla
 		return RuntimeActionExecutionResult{}, err
 	}
 	lease := leaseFromPlannedAction(plan, action, now)
+	if err := m.appendActiveConformanceExpectationAudit(ctx, lease, now); err != nil {
+		return RuntimeActionExecutionResult{}, fmt.Errorf("local conformance audit write failed; denying runtime action: %w", err)
+	}
+	if err := m.Store.AppendAudit(ctx, audit(lease, "runtime action activation authorized", now)); err != nil {
+		return RuntimeActionExecutionResult{}, fmt.Errorf("local audit write failed; denying runtime action: %w", err)
+	}
 	if err := executor.Execute(ctx, lease, signedBundle); err != nil {
 		return m.recoverAfterExecuteError(ctx, executor, lease, now, err)
 	}
@@ -453,9 +834,6 @@ func (m Manager) executePlannedAction(ctx context.Context, plan RuntimeActionPla
 		return RuntimeActionExecutionResult{}, err
 	}
 	if err := m.Store.AppendJournal(ctx, journal(lease.RuntimeActionID, "activated", lease.Status, "runtime action activated", now)); err != nil {
-		return RuntimeActionExecutionResult{}, err
-	}
-	if err := m.Store.AppendAudit(ctx, audit(lease, "runtime action activated", now)); err != nil {
 		return RuntimeActionExecutionResult{}, err
 	}
 	return RuntimeActionExecutionResult{Lease: lease, Applied: true, Message: "runtime action activated"}, nil
@@ -758,6 +1136,61 @@ func actionAllowed(runtimeBundle corebundle.RuntimeBundle, actionType string) bo
 	return false
 }
 
+func validateCapabilityGrant(runtimeBundle corebundle.RuntimeBundle, adapterID, capabilityID, actionType, targetScope, grantID string, ttl time.Duration, now time.Time) error {
+	var grant corebundle.CapabilityGrant
+	found := false
+	for _, candidate := range runtimeBundle.Spec.CapabilityGrants {
+		if candidate.ID == grantID {
+			grant = candidate
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("capability grant %q is not present in runtime bundle %q", grantID, runtimeBundle.Metadata.ID)
+	}
+	if strings.TrimSpace(grant.AdapterID) != adapterID {
+		return fmt.Errorf("capability grant %q adapter_id %q does not match requested adapter %q", grantID, grant.AdapterID, adapterID)
+	}
+	if strings.TrimSpace(grant.CapabilityID) != capabilityID {
+		return fmt.Errorf("capability grant %q capability_id %q does not match requested capability %q", grantID, grant.CapabilityID, capabilityID)
+	}
+	if strings.TrimSpace(grant.ActionType) != actionType {
+		return fmt.Errorf("capability grant %q action_type %q does not match requested action %q", grantID, grant.ActionType, actionType)
+	}
+	if !grantAllowsScope(grant, targetScope) {
+		return fmt.Errorf("target scope %q is not allowed by capability grant %q", targetScope, grantID)
+	}
+	if strings.TrimSpace(grant.MaxTTL) != "" {
+		maxTTL, err := parsePositiveDuration(grant.MaxTTL, "capability grant max_ttl")
+		if err != nil {
+			return err
+		}
+		if ttl > maxTTL {
+			return fmt.Errorf("ttl %s exceeds capability grant max_ttl %s", ttl, maxTTL)
+		}
+	}
+	if strings.TrimSpace(grant.ExpiresAt) != "" {
+		expiresAt, err := time.Parse(time.RFC3339, strings.TrimSpace(grant.ExpiresAt))
+		if err != nil {
+			return fmt.Errorf("capability grant %q expires_at is invalid: %w", grantID, err)
+		}
+		if !now.UTC().Before(expiresAt.UTC()) {
+			return fmt.Errorf("capability grant %q is expired", grantID)
+		}
+	}
+	return nil
+}
+
+func grantAllowsScope(grant corebundle.CapabilityGrant, targetScope string) bool {
+	for _, scope := range grant.AllowedTargetScopes {
+		if strings.TrimSpace(scope) == targetScope {
+			return true
+		}
+	}
+	return false
+}
+
 func parsePositiveDuration(value, field string) (time.Duration, error) {
 	if value == "" {
 		return 0, fmt.Errorf("%s is required", field)
@@ -816,10 +1249,11 @@ func audit(lease actionstate.RuntimeActionLease, message string, now time.Time) 
 		"expires_at":        lease.ExpiresAt.Format(time.RFC3339Nano),
 	})
 	return actionstate.AuditRecord{
-		ID:              "audit_spool." + shortHash(lease.RuntimeActionID+string(lease.Status)+now.Format(time.RFC3339Nano)),
+		ID:              "audit_spool." + shortHash(lease.RuntimeActionID+string(lease.Status)+message+now.Format(time.RFC3339Nano)),
 		RuntimeActionID: lease.RuntimeActionID,
 		Status:          AuditPendingUpload,
 		Payload:         string(data),
+		PayloadSHA256:   domain.SHA256JSON(data),
 		CreatedAt:       now,
 	}
 }

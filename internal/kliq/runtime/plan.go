@@ -22,6 +22,8 @@ const (
 type RuntimeActionPlan struct {
 	PlanID        string
 	DecisionID    string
+	EventType     string
+	EventID       string
 	BundleID      string
 	PolicyID      string
 	SourceCommit  string

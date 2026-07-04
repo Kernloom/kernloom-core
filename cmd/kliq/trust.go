@@ -159,6 +159,9 @@ func decodeTrustBundlePublicKey(value string) ([]byte, error) {
 }
 
 func validateTrustBundleForKLIQ(bundle domain.TrustBundle) error {
+	if strings.TrimSpace(bundle.Purpose) != "assignment_verification" {
+		return fmt.Errorf("trust bundle %q has purpose %q, expected assignment_verification", bundle.KeyID, bundle.Purpose)
+	}
 	switch bundle.Status {
 	case "active", "previous":
 	default:

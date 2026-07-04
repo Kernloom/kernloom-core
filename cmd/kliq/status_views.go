@@ -15,15 +15,16 @@ import (
 )
 
 type statusSnapshot struct {
-	GeneratedAt       string              `json:"generated_at"`
-	StatePath         string              `json:"state_path"`
-	Assignment        *assignmentView     `json:"assignment,omitempty"`
-	Bundle            *bundleStatusView   `json:"bundle,omitempty"`
-	RuntimeActions    []runtimeActionView `json:"runtime_actions"`
-	RuntimeCounts     map[string]int      `json:"runtime_counts"`
-	PendingAuditCount int                 `json:"pending_audit_count"`
-	Adapters          []adapterStatusView `json:"adapters"`
-	Findings          []string            `json:"findings,omitempty"`
+	GeneratedAt       string                `json:"generated_at"`
+	StatePath         string                `json:"state_path"`
+	Assignment        *assignmentView       `json:"assignment,omitempty"`
+	Bundle            *bundleStatusView     `json:"bundle,omitempty"`
+	RuntimeActions    []runtimeActionView   `json:"runtime_actions"`
+	RuntimeCounts     map[string]int        `json:"runtime_counts"`
+	RuntimeDecisions  []runtimeDecisionView `json:"runtime_decisions,omitempty"`
+	PendingAuditCount int                   `json:"pending_audit_count"`
+	Adapters          []adapterStatusView   `json:"adapters"`
+	Findings          []string              `json:"findings,omitempty"`
 }
 
 type assignmentView struct {
@@ -109,6 +110,21 @@ type auditRecordView struct {
 	CreatedAt       string `json:"created_at"`
 }
 
+type runtimeDecisionView struct {
+	DecisionID      string `json:"decision_id"`
+	PlanID          string `json:"plan_id"`
+	PolicyID        string `json:"policy_id"`
+	BundleID        string `json:"bundle_id"`
+	SourceCommit    string `json:"source_commit"`
+	CorrelationID   string `json:"correlation_id,omitempty"`
+	EventType       string `json:"event_type,omitempty"`
+	EventIDSHA256   string `json:"event_id_sha256,omitempty"`
+	Status          string `json:"status"`
+	PayloadSHA256   string `json:"payload_sha256"`
+	ActivatedAction string `json:"activated_action,omitempty"`
+	CreatedAt       string `json:"created_at"`
+}
+
 func buildStatusSnapshot(ctx context.Context, store actionstate.Store, statePath string, registry kliqruntime.AdapterRuntimeRegistry) (statusSnapshot, error) {
 	bundle, bundleErr := store.LastBundle(ctx)
 	if bundleErr != nil && !errors.Is(bundleErr, actionstate.ErrNotFound) {
@@ -129,6 +145,9 @@ func buildStatusSnapshot(ctx context.Context, store actionstate.Store, statePath
 		RuntimeCounts:     runtimeCounts(leases),
 		PendingAuditCount: len(audits),
 		Adapters:          adapterStatusViews(leases, registry),
+	}
+	if decisions, err := store.RuntimeDecisions(ctx, 25); err == nil {
+		snapshot.RuntimeDecisions = runtimeDecisionViews(decisions)
 	}
 	if credential, err := store.KLIQCredential(ctx); err == nil {
 		if state, err := store.KLIQManagementState(ctx, credential.KLIQID); err == nil {
@@ -154,6 +173,27 @@ func buildStatusSnapshot(ctx context.Context, store actionstate.Store, statePath
 		snapshot.Findings = append(snapshot.Findings, "bundle unavailable")
 	}
 	return snapshot, nil
+}
+
+func runtimeDecisionViews(records []actionstate.RuntimeDecisionRecord) []runtimeDecisionView {
+	views := make([]runtimeDecisionView, 0, len(records))
+	for _, record := range records {
+		views = append(views, runtimeDecisionView{
+			DecisionID:      record.DecisionID,
+			PlanID:          record.PlanID,
+			PolicyID:        record.PolicyID,
+			BundleID:        record.BundleID,
+			SourceCommit:    redactID(record.SourceCommit),
+			CorrelationID:   redactID(record.CorrelationID),
+			EventType:       record.EventType,
+			EventIDSHA256:   redactedHash(record.EventID),
+			Status:          record.Status,
+			PayloadSHA256:   record.PayloadSHA256,
+			ActivatedAction: record.ActivatedAction,
+			CreatedAt:       formatStatusTime(record.CreatedAt),
+		})
+	}
+	return views
 }
 
 func assignmentArtifactViews(records []actionstate.AssignmentArtifactRecord) []assignmentArtifactView {
@@ -305,7 +345,7 @@ func auditRecordViews(records []actionstate.AuditRecord) []auditRecordView {
 			ID:              record.ID,
 			RuntimeActionID: record.RuntimeActionID,
 			Status:          record.Status,
-			PayloadSHA256:   redactedHash(record.Payload),
+			PayloadSHA256:   record.PayloadSHA256,
 			CreatedAt:       formatStatusTime(record.CreatedAt),
 		})
 	}

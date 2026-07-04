@@ -6,14 +6,19 @@ package authn
 import (
 	"context"
 	"crypto"
+	"crypto/ed25519"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"testing"
 	"time"
+
+	"github.com/kernloom/kernloom-core/internal/core/domain"
 )
 
 func TestDevTokenVerifier(t *testing.T) {
@@ -81,6 +86,48 @@ func TestJWTVerifierRS256(t *testing.T) {
 	}
 }
 
+func TestKLIQIdentityTokenVerifierUsesRegisteredPublicKey(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicDER, err := x509.MarshalPKIXPublicKey(publicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	privateDER, err := x509.MarshalPKCS8PrivateKey(privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity := domain.KLIQIdentity{
+		KLIQID:                  "kliq.test",
+		NodeID:                  "node-1",
+		Environment:             "prod",
+		Stage:                   "prod",
+		Scope:                   "edge-prod",
+		PublicKeyPEM:            string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: publicDER})),
+		ServiceIdentityProvider: ServiceIdentityProviderSPIFFEReady,
+		SPIFFEID:                DefaultKLIQSPIFFEID("kliq.test", "prod", "prod", "edge-prod"),
+	}
+	privatePEM := string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privateDER}))
+	now := time.Date(2026, 7, 4, 12, 0, 0, 0, time.UTC)
+	token, err := IssueKLIQIdentitySignedToken(identity, privatePEM, time.Hour, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifier := KLIQIdentityTokenVerifier{
+		Store: testIdentityStore{identity: identity},
+		Now:   func() time.Time { return now },
+	}
+	principal, err := verifier.Verify(context.Background(), token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if principal.Subject != "kliq:kliq.test" || !principal.HasRole(KLIQServiceRole) || PrincipalSPIFFEID(principal) != identity.SPIFFEID {
+		t.Fatalf("unexpected principal %#v", principal)
+	}
+}
+
 func signedTestJWT(t *testing.T, secret []byte, claims map[string]any) string {
 	t.Helper()
 	header := map[string]any{"alg": "HS256", "typ": "JWT"}
@@ -116,4 +163,15 @@ func signedTestRS256JWT(t *testing.T, key *rsa.PrivateKey, claims map[string]any
 		t.Fatal(err)
 	}
 	return unsigned + "." + base64.RawURLEncoding.EncodeToString(signature)
+}
+
+type testIdentityStore struct {
+	identity domain.KLIQIdentity
+}
+
+func (s testIdentityStore) Identity(_ context.Context, kliqID string) (domain.KLIQIdentity, error) {
+	if kliqID != s.identity.KLIQID {
+		return domain.KLIQIdentity{}, ErrUnauthenticated
+	}
+	return s.identity, nil
 }

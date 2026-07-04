@@ -40,6 +40,15 @@ type AssignmentArtifactRecord struct {
 	ActivatedAt       time.Time
 }
 
+type ActiveArtifactRecord struct {
+	KLIQID       string
+	ArtifactType string
+	ArtifactID   string
+	SHA256       string
+	PayloadJSON  []byte
+	ActivatedAt  time.Time
+}
+
 type KLIQManagementState struct {
 	KLIQID                       string
 	ActiveAssignmentID           string
@@ -51,19 +60,22 @@ type KLIQManagementState struct {
 }
 
 type KLIQCredential struct {
-	KLIQID                string
-	NodeID                string
-	Environment           string
-	Stage                 string
-	Scope                 string
-	TrustKeyID            string
-	AssignmentURL         string
-	PublicKeyPEM          string
-	PrivateKeyPEM         string
-	ServiceToken          string
-	ServiceTokenExpiresAt time.Time
-	CreatedAt             time.Time
-	UpdatedAt             time.Time
+	KLIQID                  string
+	NodeID                  string
+	Environment             string
+	Stage                   string
+	Scope                   string
+	TrustKeyID              string
+	AssignmentURL           string
+	PublicKeyPEM            string
+	PrivateKeyPEM           string
+	ServiceIdentityProvider string
+	SPIFFEID                string
+	CredentialStatus        string
+	ServiceToken            string
+	ServiceTokenExpiresAt   time.Time
+	CreatedAt               time.Time
+	UpdatedAt               time.Time
 }
 
 type LocalTrustBundleRecord struct {
@@ -182,6 +194,7 @@ type AuditRecord struct {
 	RuntimeActionID string
 	Status          string
 	Payload         string
+	PayloadSHA256   string
 	CreatedAt       time.Time
 	RetryCount      int
 	LastAttemptAt   time.Time
@@ -189,11 +202,27 @@ type AuditRecord struct {
 	LastError       string
 }
 
+type RuntimeDecisionRecord struct {
+	DecisionID      string
+	PlanID          string
+	PolicyID        string
+	BundleID        string
+	SourceCommit    string
+	CorrelationID   string
+	EventType       string
+	EventID         string
+	Status          string
+	PayloadSHA256   string
+	CreatedAt       time.Time
+	ActivatedAction string
+}
+
 type Store interface {
 	SaveBundle(ctx context.Context, record BundleRecord) error
 	LastBundle(ctx context.Context) (BundleRecord, error)
 	SaveManagedBundleActivation(ctx context.Context, record BundleRecord, state KLIQManagementState, artifacts []AssignmentArtifactRecord) error
 	AssignmentArtifacts(ctx context.Context, kliqID string) ([]AssignmentArtifactRecord, error)
+	ActiveArtifact(ctx context.Context, kliqID, artifactType string) (ActiveArtifactRecord, error)
 	SaveKLIQCredential(ctx context.Context, credential KLIQCredential) error
 	KLIQCredential(ctx context.Context) (KLIQCredential, error)
 	SaveLocalTrustBundle(ctx context.Context, bundle domain.TrustBundle, persistedAt time.Time) error
@@ -212,5 +241,7 @@ type Store interface {
 	PendingAudits(ctx context.Context) ([]AuditRecord, error)
 	MarkAuditUploaded(ctx context.Context, id string, uploadedAt time.Time) error
 	MarkAuditFailed(ctx context.Context, id string, attemptedAt time.Time, message string) error
+	AppendRuntimeDecision(ctx context.Context, record RuntimeDecisionRecord) error
+	RuntimeDecisions(ctx context.Context, limit int) ([]RuntimeDecisionRecord, error)
 	Close() error
 }

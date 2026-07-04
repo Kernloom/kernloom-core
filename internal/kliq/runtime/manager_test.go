@@ -6,6 +6,7 @@ package runtime
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +18,8 @@ import (
 
 	coreartifact "github.com/kernloom/kernloom-core/internal/core/artifact"
 	corebundle "github.com/kernloom/kernloom-core/internal/core/bundle"
+	"github.com/kernloom/kernloom-core/internal/core/conformance"
+	corecontext "github.com/kernloom/kernloom-core/internal/core/context"
 	"github.com/kernloom/kernloom-core/internal/core/domain"
 	"github.com/kernloom/kernloom-core/internal/core/signing"
 	"github.com/kernloom/kernloom-core/internal/kliq/actionstate"
@@ -172,6 +175,145 @@ func TestManagerLoadManagedBundleKeepsPreviousActiveOnRuntimeArtifactVerificatio
 	assertActiveManagedAssignment(t, store, ctx, 1, currentAssignment.PayloadSHA256, validRecord.PayloadSHA256)
 }
 
+func TestManagerLoadManagedBundleActivatesFullAssignmentArtifacts(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+	store := openTestStore(t)
+	defer store.Close()
+	signer := testSigner(t, now)
+	assignment := managedTestAssignment(now, signer.KeyID, 1, signedBundleData(t, signer, now, now.Add(time.Hour)))
+	assignment.Artifacts = append(assignment.Artifacts,
+		signedAssignmentArtifact(t, signer, now, "adapter_assignment", "adapter_assignment.klshield", domain.AdapterAssignment{
+			Kind:      "AdapterAssignment",
+			AdapterID: testAdapterID,
+			Endpoint:  "127.0.0.1:19090",
+		}),
+		signedAssignmentArtifact(t, signer, now, "context_route_pack", "context_route_pack.test", corecontext.ContextRoutePack{
+			Kind: "ContextRoutePack",
+			Spec: corecontext.ContextRoutePackSpec{
+				PolicyID: "policy.runtime",
+				Target:   "edge-prod",
+				Stage:    "prod",
+				Routes: []corecontext.ContextRoute{{
+					Name:      "source-minimal",
+					Consumers: []string{testAdapterID},
+					Facts:     []string{"source.ip"},
+				}},
+			},
+		}),
+		signedAssignmentArtifact(t, signer, now, "conformance_expectation", "conformance_expectation.test", conformance.ConformanceExpectation{
+			Kind: "ConformanceExpectation",
+			Spec: conformance.ConformanceExpectationSpec{
+				PolicyID: "policy.runtime",
+				Target:   "edge-prod",
+				Stage:    "prod",
+				Expectations: []conformance.Expectation{{
+					Name:        "runtime action audit exists",
+					Description: "required runtime action emits local audit",
+				}},
+			},
+		}),
+		signedAssignmentArtifact(t, signer, now, "trust_bundle", "trust_bundle.test", domain.TrustBundle{
+			KeyID:     signer.KeyID,
+			PublicKey: "public-key",
+			Purpose:   "assignment_verification",
+			Status:    "active",
+			ExpiresAt: now.Add(time.Hour),
+			Issuer:    "test",
+		}),
+		signedAssignmentArtifact(t, signer, now, "management_profile", "management_profile.test", domain.KLIQManagementProfile{
+			Kind:               "KLIQManagementProfile",
+			ProfileID:          "management_profile.test",
+			Mode:               "managed_pull",
+			PollInterval:       "2s",
+			HeartbeatInterval:  "3s",
+			StatusInterval:     "4s",
+			DecisionInterval:   "5s",
+			ReconcileInterval:  "6s",
+			AuditFlushInterval: "7s",
+			AssignmentSource:   "forge_assignment_api",
+		}),
+		signedAssignmentArtifact(t, signer, now, "fallback_profile", "fallback_profile.test", domain.KLIQFallbackProfile{
+			Kind:                          "KLIQFallbackProfile",
+			ProfileID:                     "fallback_profile.test",
+			Mode:                          "last_valid_assignment",
+			AllowCachedAssignmentFallback: true,
+			DenyNewActionsWhenDegraded:    true,
+			AuditRequired:                 true,
+		}),
+	)
+	currentAssignment := signedManagedAssignment(t, signer, assignment, now.Add(time.Hour))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(currentAssignment)
+	}))
+	defer server.Close()
+	manager := testManager(store, signer, now)
+
+	if _, err := manager.LoadManagedBundle(ctx, managedAssignmentSource(server.URL, signer.KeyID)); err != nil {
+		t.Fatal(err)
+	}
+	for _, artifactType := range []string{"runtime_bundle", "adapter_assignment", "context_route_pack", "conformance_expectation", "trust_bundle", "management_profile", "fallback_profile"} {
+		record, err := store.ActiveArtifact(ctx, "kliq.test", artifactType)
+		if err != nil {
+			t.Fatalf("expected active %s artifact: %v", artifactType, err)
+		}
+		if len(record.PayloadJSON) == 0 || record.SHA256 == "" {
+			t.Fatalf("expected active %s payload and digest, got %#v", artifactType, record)
+		}
+	}
+	records, err := store.AssignmentArtifacts(ctx, "kliq.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 7 {
+		t.Fatalf("expected seven activated artifacts, got %#v", records)
+	}
+	for _, record := range records {
+		if record.ActivationStatus != "activated" {
+			t.Fatalf("expected activated artifact status, got %#v", record)
+		}
+	}
+}
+
+func TestManagerLoadManagedBundleRejectsInvalidContextRoutePackAndKeepsPreviousActive(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+	store := openTestStore(t)
+	defer store.Close()
+	signer := testSigner(t, now)
+	validRuntimeEnvelope := signedBundleData(t, signer, now, now.Add(time.Hour))
+	currentAssignment := signedManagedAssignment(t, signer, managedTestAssignment(now, signer.KeyID, 1, validRuntimeEnvelope), now.Add(time.Hour))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(currentAssignment)
+	}))
+	defer server.Close()
+	manager := testManager(store, signer, now)
+
+	validRecord, err := manager.LoadManagedBundle(ctx, managedAssignmentSource(server.URL, signer.KeyID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	invalid := managedTestAssignment(now, signer.KeyID, 2, validRuntimeEnvelope)
+	invalid.Artifacts = append(invalid.Artifacts, signedAssignmentArtifact(t, signer, now, "context_route_pack", "context_route_pack.invalid", corecontext.ContextRoutePack{
+		Kind: "ContextRoutePack",
+		Spec: corecontext.ContextRoutePackSpec{
+			PolicyID: "policy.runtime",
+			Target:   "edge-prod",
+			Stage:    "prod",
+		},
+	}))
+	currentAssignment = signedManagedAssignment(t, signer, invalid, now.Add(time.Hour))
+
+	_, err = manager.LoadManagedBundle(ctx, managedAssignmentSource(server.URL, signer.KeyID))
+	if err == nil || !strings.Contains(err.Error(), "spec.routes") {
+		t.Fatalf("expected invalid context route pack rejection, got %v", err)
+	}
+	assertActiveManagedAssignment(t, store, ctx, 1, currentAssignment.PayloadSHA256, validRecord.PayloadSHA256)
+	if _, err := store.ActiveArtifact(ctx, "kliq.test", "context_route_pack"); !errors.Is(err, actionstate.ErrNotFound) {
+		t.Fatalf("expected rejected context route pack not to activate, got %v", err)
+	}
+}
+
 func TestManagerExecutesRequiredActionThroughPlanAndDeduplicates(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC)
@@ -278,12 +420,13 @@ func TestManagerDoesNotDeduplicateSameActionAcrossAdapters(t *testing.T) {
 		AuditID:    "audit.adapter-a",
 	})
 	second := executeTestAction(t, manager, ctx, ExecuteRequest{
-		DecisionID:   "decision.adapter-b",
-		AdapterID:    testAdapterIDAlt,
-		CapabilityID: testCapabilityID,
-		TargetKey:    "source-shared",
-		Reason:       "second adapter action",
-		AuditID:      "audit.adapter-b",
+		DecisionID:        "decision.adapter-b",
+		AdapterID:         testAdapterIDAlt,
+		CapabilityID:      testCapabilityID,
+		CapabilityGrantID: "grant.nginx.klshield.runtime.source_mitigation",
+		TargetKey:         "source-shared",
+		Reason:            "second adapter action",
+		AuditID:           "audit.adapter-b",
 	})
 	if !first.Applied || !second.Applied {
 		t.Fatalf("expected both adapter-specific actions to apply, got %#v %#v", first, second)
@@ -316,11 +459,12 @@ func TestManagerDoesNotDeduplicateSameActionAcrossCapabilities(t *testing.T) {
 		AuditID:    "audit.capability-a",
 	})
 	second := executeTestAction(t, manager, ctx, ExecuteRequest{
-		DecisionID:   "decision.capability-b",
-		CapabilityID: testCapabilityIDAlt,
-		TargetKey:    "source-shared-capability",
-		Reason:       "second capability action",
-		AuditID:      "audit.capability-b",
+		DecisionID:        "decision.capability-b",
+		CapabilityID:      testCapabilityIDAlt,
+		CapabilityGrantID: "grant.klshield.nginx.runtime.route_mitigation",
+		TargetKey:         "source-shared-capability",
+		Reason:            "second capability action",
+		AuditID:           "audit.capability-b",
 	})
 	if !first.Applied || !second.Applied {
 		t.Fatalf("expected both capability-specific actions to apply, got %#v %#v", first, second)
@@ -362,6 +506,52 @@ func TestManagerUsesBundleDefaultsWhenRequestOmitsTTLAndScope(t *testing.T) {
 	}
 	if result.Lease.TTL != "2m" || !result.Lease.ExpiresAt.Equal(now.Add(2*time.Minute)) {
 		t.Fatalf("expected ttl to fall back to bundle max_ttl, got %q expiring %s", result.Lease.TTL, result.Lease.ExpiresAt)
+	}
+}
+
+func TestManagerRejectsRuntimeActionOutsideCapabilityGrant(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC)
+	store := openTestStore(t)
+	defer store.Close()
+	signer := testSigner(t, now)
+	manager := testManager(store, signer, now, testAdapter(testAdapterID, LocalTestExecutor{}))
+	bundle := testRuntimeBundle()
+	bundle.Spec.CapabilityGrants[0].AllowedTargetScopes = []string{"application"}
+	if _, err := manager.LoadBundle(ctx, kliqbundle.LocalFileSource{Path: signedBundleFileForBundle(t, signer, bundle, now, now.Add(time.Hour))}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := manager.ExecuteAction(ctx, defaultExecuteRequest(ExecuteRequest{
+		DecisionID:        "decision.grant-scope",
+		CapabilityGrantID: testCapabilityGrantID,
+		TargetKey:         "source-grant-scope",
+		Reason:            "test grant target scope",
+		AuditID:           "audit.grant-scope",
+	}))
+	if err == nil || !strings.Contains(err.Error(), "target scope") {
+		t.Fatalf("expected target scope outside capability grant to be rejected, got %v", err)
+	}
+}
+
+func TestManagerRejectsRuntimeActionWithMissingCapabilityGrant(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC)
+	store := openTestStore(t)
+	defer store.Close()
+	signer := testSigner(t, now)
+	manager := testManager(store, signer, now, testAdapter(testAdapterID, LocalTestExecutor{}))
+	loadTestBundle(t, manager, ctx, signer, now, now.Add(time.Hour))
+
+	_, err := manager.ExecuteAction(ctx, defaultExecuteRequest(ExecuteRequest{
+		DecisionID:        "decision.grant-missing",
+		CapabilityGrantID: "grant.missing",
+		TargetKey:         "source-grant-missing",
+		Reason:            "test missing capability grant",
+		AuditID:           "audit.grant-missing",
+	}))
+	if err == nil || !strings.Contains(err.Error(), "is not present") {
+		t.Fatalf("expected missing capability grant to be rejected, got %v", err)
 	}
 }
 
@@ -412,6 +602,38 @@ func TestManagerRequiresAuditIDOrExplicitDecisionDerivedAuditID(t *testing.T) {
 	})
 	if result.Lease.AuditID != "audit."+shortHash("decision.derive-audit") {
 		t.Fatalf("expected audit id derived from decision id, got %q", result.Lease.AuditID)
+	}
+}
+
+func TestManagerDeniesNewActionWhenLocalAuditWriteFails(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC)
+	store := openTestStore(t)
+	defer store.Close()
+	signer := testSigner(t, now)
+	executor := &countingExecutor{}
+	manager := testManager(store, signer, now, testAdapter(testAdapterID, executor))
+	loadTestBundle(t, manager, ctx, signer, now, now.Add(time.Hour))
+	manager.Store = auditFailStore{Store: store}
+
+	_, err := manager.ExecuteAction(ctx, defaultExecuteRequest(ExecuteRequest{
+		DecisionID: "decision.audit-write-fails",
+		TargetKey:  "source-audit-write-fails",
+		Reason:     "test local audit write failure",
+		AuditID:    "audit.audit-write-fails",
+	}))
+	if err == nil || !strings.Contains(err.Error(), "local audit write failed") {
+		t.Fatalf("expected local audit failure to deny runtime action, got %v", err)
+	}
+	if executor.executeCalls != 0 {
+		t.Fatalf("expected adapter not to be executed when audit write fails, got %d calls", executor.executeCalls)
+	}
+	leases, err := store.AllLeases(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(leases) != 0 {
+		t.Fatalf("expected no lease after audit write failure, got %#v", leases)
 	}
 }
 
@@ -640,8 +862,13 @@ func testSigner(t *testing.T, now time.Time) *signing.DevLocalSigner {
 
 func signedBundleFile(t *testing.T, signer *signing.DevLocalSigner, signedAt, expiresAt time.Time) string {
 	t.Helper()
+	return signedBundleFileForBundle(t, signer, testRuntimeBundle(), signedAt, expiresAt)
+}
+
+func signedBundleFileForBundle(t *testing.T, signer *signing.DevLocalSigner, runtimeBundle corebundle.RuntimeBundle, signedAt, expiresAt time.Time) string {
+	t.Helper()
 	path := filepath.Join(t.TempDir(), "runtime_bundle.signed.json")
-	data := signedBundleData(t, signer, signedAt, expiresAt)
+	data := signedBundleDataForBundle(t, signer, runtimeBundle, signedAt, expiresAt)
 	if err := os.WriteFile(path, data, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -650,7 +877,12 @@ func signedBundleFile(t *testing.T, signer *signing.DevLocalSigner, signedAt, ex
 
 func signedBundleData(t *testing.T, signer *signing.DevLocalSigner, signedAt, expiresAt time.Time) []byte {
 	t.Helper()
-	envelope := signedBundleEnvelope(t, signer, signedAt, expiresAt)
+	return signedBundleDataForBundle(t, signer, testRuntimeBundle(), signedAt, expiresAt)
+}
+
+func signedBundleDataForBundle(t *testing.T, signer *signing.DevLocalSigner, runtimeBundle corebundle.RuntimeBundle, signedAt, expiresAt time.Time) []byte {
+	t.Helper()
+	envelope := signedBundleEnvelopeForBundle(t, signer, runtimeBundle, signedAt, expiresAt)
 	data, err := json.Marshal(envelope)
 	if err != nil {
 		t.Fatal(err)
@@ -660,8 +892,13 @@ func signedBundleData(t *testing.T, signer *signing.DevLocalSigner, signedAt, ex
 
 func signedBundleEnvelope(t *testing.T, signer *signing.DevLocalSigner, signedAt, expiresAt time.Time) signing.SignedEnvelope {
 	t.Helper()
+	return signedBundleEnvelopeForBundle(t, signer, testRuntimeBundle(), signedAt, expiresAt)
+}
+
+func signedBundleEnvelopeForBundle(t *testing.T, signer *signing.DevLocalSigner, runtimeBundle corebundle.RuntimeBundle, signedAt, expiresAt time.Time) signing.SignedEnvelope {
+	t.Helper()
 	signer.Now = func() time.Time { return signedAt }
-	payload, err := json.Marshal(testRuntimeBundle())
+	payload, err := json.Marshal(runtimeBundle)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -696,6 +933,36 @@ func managedTestAssignment(now time.Time, trustKeyID string, version int64, runt
 			Envelope:     append([]byte(nil), runtimeEnvelope...),
 		}},
 	}
+}
+
+func signedAssignmentArtifact(t *testing.T, signer *signing.DevLocalSigner, now time.Time, artifactType, artifactID string, payload any) domain.KLIQAssignedArtifact {
+	t.Helper()
+	data, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer.Now = func() time.Time { return now }
+	envelope, err := signer.Sign(context.Background(), data, signing.Metadata{
+		SourceCommit: "abc123",
+		ExpiresAt:    ptrTime(now.Add(time.Hour)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelopeData, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return domain.KLIQAssignedArtifact{
+		ArtifactType: artifactType,
+		ArtifactID:   artifactID,
+		SHA256:       domain.SHA256JSON(envelopeData),
+		Envelope:     envelopeData,
+	}
+}
+
+func ptrTime(value time.Time) *time.Time {
+	return &value
 }
 
 func managedAssignmentSource(serverURL, trustKeyID string) *kliqbundle.ManagedAssignmentSource {
@@ -764,6 +1031,41 @@ func testRuntimeBundle() corebundle.RuntimeBundle {
 				Label:       "deny temporarily source",
 				CanonicalID: "runtime_action.deny_temporarily_source",
 			}},
+			CapabilityGrants: []corebundle.CapabilityGrant{
+				{
+					ID:                  testCapabilityGrantID,
+					AdapterID:           testAdapterID,
+					CapabilityID:        testCapabilityID,
+					ActionType:          "runtime_action.deny_temporarily_source",
+					AllowedTargetScopes: []string{"source"},
+					MaxTTL:              "2m",
+					Stage:               "prod",
+					Owner:               "security-platform",
+					ApprovalRef:         "build.policy.runtime",
+				},
+				{
+					ID:                  "grant.nginx.klshield.runtime.source_mitigation",
+					AdapterID:           testAdapterIDAlt,
+					CapabilityID:        testCapabilityID,
+					ActionType:          "runtime_action.deny_temporarily_source",
+					AllowedTargetScopes: []string{"source"},
+					MaxTTL:              "2m",
+					Stage:               "prod",
+					Owner:               "security-platform",
+					ApprovalRef:         "build.policy.runtime",
+				},
+				{
+					ID:                  "grant.klshield.nginx.runtime.route_mitigation",
+					AdapterID:           testAdapterID,
+					CapabilityID:        testCapabilityIDAlt,
+					ActionType:          "runtime_action.deny_temporarily_source",
+					AllowedTargetScopes: []string{"source"},
+					MaxTTL:              "2m",
+					Stage:               "prod",
+					Owner:               "security-platform",
+					ApprovalRef:         "build.policy.runtime",
+				},
+			},
 			MaxTTL:   "2m",
 			MaxScope: "source",
 		},
@@ -899,4 +1201,25 @@ func assertFindingContains(t *testing.T, findings []string, text string) {
 		}
 	}
 	t.Fatalf("expected finding containing %q, got %#v", text, findings)
+}
+
+type auditFailStore struct {
+	actionstate.Store
+}
+
+func (s auditFailStore) AppendAudit(context.Context, actionstate.AuditRecord) error {
+	return fmt.Errorf("audit spool unavailable")
+}
+
+type countingExecutor struct {
+	executeCalls int
+}
+
+func (e *countingExecutor) Execute(context.Context, actionstate.RuntimeActionLease, []byte) error {
+	e.executeCalls++
+	return nil
+}
+
+func (e *countingExecutor) Cleanup(context.Context, actionstate.RuntimeActionLease) error {
+	return nil
 }

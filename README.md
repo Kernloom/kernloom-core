@@ -40,7 +40,6 @@ make build
   --redis-addr 127.0.0.1:6379 \
   --management-store postgres \
   --management-postgres-dsn 'postgres://kernloom:kernloom-dev-password@127.0.0.1:5432/kernloom?sslmode=disable' \
-  --kliq-service-token-secret 'dev-kliq-service-token-secret' \
   --dev-tokens
 ```
 
@@ -64,6 +63,12 @@ curl -sS -H "Authorization: Bearer ${TOKEN}" \
 ```
 
 The API also accepts signed JWTs with OIDC/OAuth2-style claims when started with `--oidc-hmac-secret`; the local dev token provider is opt-in with `--dev-tokens`.
+Managed KLIQs authenticate with their registered KLIQ identity by default. A
+shared HMAC KLIQ service token secret remains available only for dev/risk
+accepted compatibility through `--kliq-service-token-secret-file` or
+`KERNLOOM_KLIQ_SERVICE_TOKEN_SECRET`; passing it directly as
+`--kliq-service-token-secret` requires
+`--dev-allow-cli-kliq-service-token-secret`.
 
 ## Managed KLIQ Assignments
 
@@ -81,7 +86,7 @@ For a throwaway smoke test without Postgres, start Forge explicitly in dev mode:
   --queue memory \
   --management-store memory \
   --dev-management \
-  --kliq-service-token-secret 'dev-kliq-service-token-secret' \
+  --dev-seed-management-trust \
   --dev-tokens
 ```
 
@@ -100,7 +105,10 @@ curl -sS -H 'Content-Type: application/json' \
 
 Use the returned `registration.kliq_id` and `service_token`. Assignments are
 planned by Forge from the KLIQ registration and approved artifacts; arbitrary
-manual assignment JSON is no longer a production endpoint.
+manual assignment JSON is no longer a production endpoint. The
+`approved_build_ref` must point to a signed `PolicyBuildManifest` envelope with
+approval authority metadata and environment/stage/scope matching the KLIQ
+registration.
 
 ```sh
 curl -sS -H "Authorization: Bearer ${OPERATOR_TOKEN}" \
@@ -116,6 +124,7 @@ before activation:
 ```sh
 ./bin/kliq load-managed-bundle \
   --assignment-url http://127.0.0.1:8080 \
+  --dev-insecure-forge-transport \
   --bearer-token "<service_token>" \
   --kliq-id "<kliq_id>" \
   --environment prod \
@@ -147,7 +156,10 @@ Run the KLShield adapter with the default memory runtime store:
 ```sh
 cd ../kernloom-adapter-klshield
 make build
-./bin/kernloom-adapter-klshield serve --addr 127.0.0.1:18082
+./bin/kernloom-adapter-klshield serve \
+  --addr 127.0.0.1:18082 \
+  --dev-insecure-transport \
+  --dev-insecure-skip-authority-verification
 ```
 
 On a Linux lab host where `kernloom-shield` has loaded and pinned its maps, use
@@ -156,6 +168,10 @@ the real KLShield BPF backend instead:
 ```sh
 sudo ./bin/kernloom-adapter-klshield serve \
   --addr 127.0.0.1:18082 \
+  --tls-cert /etc/kernloom/adapter/server.crt \
+  --tls-key /etc/kernloom/adapter/server.key \
+  --client-ca /etc/kernloom/adapter/client-ca.pem \
+  --authority-public-key /etc/kernloom/trust/runtime-authority.public.json \
   --runtime-store bpf \
   --bpffs-root /sys/fs/bpf \
   --default-rate-pps 1000 \
@@ -172,8 +188,9 @@ cd ../kernloom-core
   --state /tmp/kernloom-kliq-runtime/state.db \
   --adapter-id kernloom.adapter.klshield \
   --adapter-addr 127.0.0.1:18082 \
+  --dev-insecure-adapter-transport \
   --capability-id klshield.runtime.source_mitigation \
-  --capability-grant-id grant.local.klshield.runtime.source_mitigation \
+  --capability-grant-id "<capability_grant_id from active RuntimeBundle>" \
   --decision-id decision.slice5_6.local \
   --action-type runtime_action.rate_limit_source \
   --target-scope source \
@@ -187,7 +204,8 @@ cd ../kernloom-core
   --dev-allow-private-trust-key \
   --state /tmp/kernloom-kliq-runtime/state.db \
   --adapter-id kernloom.adapter.klshield \
-  --adapter-addr 127.0.0.1:18082
+  --adapter-addr 127.0.0.1:18082 \
+  --dev-insecure-adapter-transport
 ```
 
 Inspect local KLIQ runtime state without exposing raw targets, audit payloads or
@@ -225,7 +243,7 @@ podman compose -f docker-compose.dev.yml up -d
 
 ## Release
 
-Release pipelines must run formatting, vetting, linting, unit tests, integration tests, binary builds, container builds and release signing before publishing artifacts.
+Release pipelines must run formatting, vetting, linting, unit tests, integration tests, binary builds, checksums, SBOM generation, vulnerability scans and release signing before publishing artifacts. Local hooks are `make release-check`, `make sbom`, `make vuln-scan`, `make checksums` and `make release-sign`.
 
 ## Dependencies
 

@@ -43,6 +43,7 @@ func (s Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/me", s.requireAuth(s.me))
 	mux.HandleFunc("POST /v1/simulation-jobs", s.requireAuth(s.createSimulationJob))
 	mux.HandleFunc("GET /v1/jobs/{id}", s.requireAuth(s.getJob))
+	mux.HandleFunc("POST /v1/policy-build-manifests/approve", s.requireAuth(s.approvePolicyBuildManifest))
 	mux.HandleFunc("POST /v1/kliq/enrollment-tokens", s.requireAuth(s.createEnrollmentToken))
 	mux.HandleFunc("POST /v1/kliq/enrollment-tokens/{token_id}/revoke", s.requireAuth(s.revokeEnrollmentToken))
 	mux.HandleFunc("POST /v1/kliq/enroll", s.enrollKLIQ)

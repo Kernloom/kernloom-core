@@ -5,12 +5,31 @@ package management
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/kernloom/kernloom-core/internal/core/domain"
 	"github.com/kernloom/kernloom-core/internal/core/signing"
 )
+
+func TestPostgresMigrationsAreVersionedAndCarryServiceIdentityColumns(t *testing.T) {
+	migrations := postgresMigrations()
+	if len(migrations) < 2 {
+		t.Fatalf("expected versioned postgres migrations, got %#v", migrations)
+	}
+	for i, migration := range migrations {
+		if migration.Version != i+1 || migration.Name == "" || len(migration.Statements) == 0 {
+			t.Fatalf("unexpected migration at index %d: %#v", i, migration)
+		}
+	}
+	joined := strings.Join(migrations[1].Statements, "\n")
+	for _, column := range []string{"service_identity_provider", "spiffe_id", "credential_status", "credential_expires_at"} {
+		if !strings.Contains(joined, column) {
+			t.Fatalf("expected service identity column %q in postgres migrations", column)
+		}
+	}
+}
 
 func TestMemoryStoreEnrollmentTokenSingleUseExpiryRevocationAndAudit(t *testing.T) {
 	store := NewMemoryStore()
@@ -151,7 +170,7 @@ func TestMemoryStoreDoesNotReactivateRevokedTrustBundle(t *testing.T) {
 	bundle := domain.TrustBundle{
 		KeyID:     "forge-management-dev-local",
 		PublicKey: "public-key",
-		Purpose:   "kliq_assignment",
+		Purpose:   "assignment_verification",
 		Status:    "active",
 		ExpiresAt: now.Add(time.Hour),
 		Issuer:    "test",
@@ -174,7 +193,7 @@ func TestMemoryStoreRejectsTrustBundlePublicKeyReplacement(t *testing.T) {
 	bundle := domain.TrustBundle{
 		KeyID:     "forge-management-dev-local",
 		PublicKey: "public-key-a",
-		Purpose:   "kliq_assignment",
+		Purpose:   "assignment_verification",
 		Status:    "active",
 		ExpiresAt: now.Add(time.Hour),
 		Issuer:    "test",
@@ -196,7 +215,7 @@ func TestMemoryStoreRejectsSilentTrustBundleExpiryExtension(t *testing.T) {
 	bundle := domain.TrustBundle{
 		KeyID:     "forge-management-dev-local",
 		PublicKey: "public-key",
-		Purpose:   "kliq_assignment",
+		Purpose:   "assignment_verification",
 		Status:    "active",
 		ExpiresAt: now.Add(time.Hour),
 		Issuer:    "test",

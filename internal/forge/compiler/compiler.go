@@ -335,10 +335,7 @@ func compileOne(ctx context.Context, card *intent.Card, catalog *registry.Catalo
 			Profile:       DigestRef{ID: profile.ID, Digest: digestJSON(profile)},
 			RiskRecipe:    DigestRef{ID: riskRecipe.ID, Digest: digestJSON(riskRecipe)},
 			CatalogDigest: digestJSON(catalog),
-			Adapters: map[string]AdapterRef{
-				"ziti":     {ManifestDigest: "sha256:pending-slice-3", ProtocolVersion: "adapter/v1"},
-				"klshield": {ManifestDigest: "sha256:pending-slice-3", ProtocolVersion: "adapter/v1"},
-			},
+			Adapters:      adapterManifestRefs(opts),
 			Outputs: map[string]string{
 				"resolved_policy":         resolvedOutput.SHA256,
 				"runtime_bundle":          runtimeBundleOutput.SHA256,
@@ -362,7 +359,10 @@ func compileOne(ctx context.Context, card *intent.Card, catalog *registry.Catalo
 			}),
 		},
 	}
-	manifestPath, manifestHash, err := writeJSON(filepath.Join(opts.OutputDir, "reports", card.ID+".manifest.json"), manifest)
+	manifestMetadata := artifactMetadata
+	manifestMetadata.ID = manifest.Metadata.ID
+	manifestMetadata.ArtifactType = "policy_build_manifest"
+	manifestOutput, err := emitJSONArtifact(ctx, filepath.Join(opts.OutputDir, "reports", card.ID+".manifest.json"), manifest, manifestMetadata, services, opts)
 	if err != nil {
 		return Result{}, err
 	}
@@ -378,7 +378,8 @@ func compileOne(ctx context.Context, card *intent.Card, catalog *registry.Catalo
 		RuntimeBundlePath:                       runtimeBundleOutput.Path,
 		ContextRoutePackPath:                    contextRoutePackOutput.Path,
 		ConformanceExpectationPath:              conformanceExpectationOutput.Path,
-		ManifestPath:                            manifestPath,
+		ManifestPath:                            manifestOutput.Path,
+		ManifestSignedPath:                      manifestOutput.SignedPath,
 		CoveragePath:                            coveragePath,
 		SimulationPath:                          simulationPath,
 		ValidationPath:                          validationPath,
@@ -390,7 +391,8 @@ func compileOne(ctx context.Context, card *intent.Card, catalog *registry.Catalo
 		RuntimeBundleSHA256:                     runtimeBundleOutput.SHA256,
 		ContextRoutePackSHA256:                  contextRoutePackOutput.SHA256,
 		ConformanceExpectationSHA256:            conformanceExpectationOutput.SHA256,
-		ManifestSHA256:                          manifestHash,
+		ManifestSHA256:                          manifestOutput.SHA256,
+		ManifestSignedSHA256:                    manifestOutput.SignedSHA256,
 		ResolvedSignedSHA256:                    resolvedOutput.SignedSHA256,
 		RuntimeBundleSignedSHA256:               runtimeBundleOutput.SignedSHA256,
 		ContextRoutePackSignedSHA256:            contextRoutePackOutput.SignedSHA256,
@@ -399,10 +401,12 @@ func compileOne(ctx context.Context, card *intent.Card, catalog *registry.Catalo
 		RuntimeBundleArtifactRef:                runtimeBundleOutput.Ref,
 		ContextRoutePackArtifactRef:             contextRoutePackOutput.Ref,
 		ConformanceExpectationArtifactRef:       conformanceExpectationOutput.Ref,
+		ManifestArtifactRef:                     manifestOutput.Ref,
 		ResolvedSignedArtifactRef:               resolvedOutput.SignedRef,
 		RuntimeBundleSignedArtifactRef:          runtimeBundleOutput.SignedRef,
 		ContextRoutePackSignedArtifactRef:       contextRoutePackOutput.SignedRef,
 		ConformanceExpectationSignedArtifactRef: conformanceExpectationOutput.SignedRef,
+		ManifestSignedArtifactRef:               manifestOutput.SignedRef,
 	}, nil
 }
 
@@ -547,23 +551,60 @@ func runtimeBundleArtifact(card *intent.Card, resolved ResolvedPolicy, metadata 
 	metadata.ID = "runtime_bundle." + card.ID
 	metadata.ArtifactType = "runtime_bundle"
 	actions := make([]bundle.RuntimeAction, 0, len(resolved.Spec.Runtime.Actions))
+	grants := make([]bundle.CapabilityGrant, 0, len(resolved.Spec.Runtime.Actions))
 	for _, action := range resolved.Spec.Runtime.Actions {
 		actions = append(actions, bundle.RuntimeAction{Label: action.Label, CanonicalID: action.CanonicalID})
+		if grant, ok := runtimeCapabilityGrant(card, resolved, action.CanonicalID); ok {
+			grants = append(grants, grant)
+		}
 	}
 	return bundle.RuntimeBundle{
 		Kind:     "RuntimeBundle",
 		Metadata: metadata,
 		Spec: bundle.RuntimeBundleSpec{
-			PolicyID:       card.ID,
-			RuntimeAllowed: resolved.Spec.Runtime.Allowed,
-			RuntimeActions: actions,
-			MaxTTL:         resolved.Spec.Runtime.MaxTTL,
-			MaxTTLSource:   resolved.Spec.Runtime.MaxTTLSource,
-			MaxScope:       resolved.Spec.Runtime.MaxScope.Label,
-			MaxScopeSource: resolved.Spec.Runtime.MaxScopeSource,
+			PolicyID:         card.ID,
+			RuntimeAllowed:   resolved.Spec.Runtime.Allowed,
+			RuntimeActions:   actions,
+			CapabilityGrants: grants,
+			MaxTTL:           resolved.Spec.Runtime.MaxTTL,
+			MaxTTLSource:     resolved.Spec.Runtime.MaxTTLSource,
+			MaxScope:         resolved.Spec.Runtime.MaxScope.Label,
+			MaxScopeSource:   resolved.Spec.Runtime.MaxScopeSource,
 		},
 		Status: artifact.PlannedStatus("Runtime bundle is planned and locally verifiable. Real adapter execution is not implemented yet."),
 	}
+}
+
+func runtimeCapabilityGrant(card *intent.Card, resolved ResolvedPolicy, actionType string) (bundle.CapabilityGrant, bool) {
+	adapterID, capabilityID, ok := runtimeCapabilityForAction(actionType)
+	if !ok {
+		return bundle.CapabilityGrant{}, false
+	}
+	scope := resolved.Spec.Runtime.MaxScope.Label
+	return bundle.CapabilityGrant{
+		ID:                  capabilityGrantID(card.ID, adapterID, capabilityID, actionType, scope),
+		AdapterID:           adapterID,
+		CapabilityID:        capabilityID,
+		ActionType:          actionType,
+		AllowedTargetScopes: []string{scope},
+		MaxTTL:              resolved.Spec.Runtime.MaxTTL,
+		Stage:               card.Stage,
+		Owner:               card.Owner,
+		ApprovalRef:         "build." + card.ID,
+	}, true
+}
+
+func runtimeCapabilityForAction(actionType string) (string, string, bool) {
+	switch actionType {
+	case "runtime_action.rate_limit_source", "runtime_action.deny_temporarily_source":
+		return "kernloom.adapter.klshield", "klshield.runtime.source_mitigation", true
+	default:
+		return "", "", false
+	}
+}
+
+func capabilityGrantID(policyID, adapterID, capabilityID, actionType, scope string) string {
+	return "grant." + strings.TrimPrefix(sha256String(strings.Join([]string{policyID, adapterID, capabilityID, actionType, scope}, "\x00")), "sha256:")[:16]
 }
 
 func contextRoutePackArtifact(card *intent.Card, resolved ResolvedPolicy, metadata artifact.Metadata) corecontext.ContextRoutePack {
@@ -637,6 +678,56 @@ func validateCatalogCEL(catalog *registry.Catalog, celValidator *expression.CELV
 		}
 	}
 	return nil
+}
+
+func adapterManifestRefs(opts Options) map[string]AdapterRef {
+	return map[string]AdapterRef{
+		"ziti": {
+			ManifestDigest:  adapterRepoDigest(opts, "kernloom-adapter-ziti"),
+			ProtocolVersion: "adapter/v1",
+		},
+		"klshield": {
+			ManifestDigest:  adapterRepoDigest(opts, "kernloom-adapter-klshield"),
+			ProtocolVersion: "adapter/v1",
+		},
+	}
+}
+
+func adapterRepoDigest(opts Options, repo string) string {
+	for _, root := range workspaceRootCandidates(opts) {
+		path := filepath.Join(root, repo)
+		if info, err := os.Stat(path); err == nil && info.IsDir() {
+			return pathSHA256(path)
+		}
+	}
+	return "sha256:unavailable"
+}
+
+func workspaceRootCandidates(opts Options) []string {
+	seen := map[string]bool{}
+	var roots []string
+	add := func(path string) {
+		if path == "" {
+			return
+		}
+		abs, err := filepath.Abs(path)
+		if err != nil {
+			return
+		}
+		if !seen[abs] {
+			seen[abs] = true
+			roots = append(roots, abs)
+		}
+	}
+	for _, path := range []string{opts.PolicyRepo, opts.CoreRegistry, opts.EnterpriseRegistry} {
+		if path == "" {
+			continue
+		}
+		add(filepath.Dir(path))
+	}
+	add("..")
+	add(".")
+	return roots
 }
 
 func intentFiles(opts Options) ([]string, error) {

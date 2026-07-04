@@ -39,6 +39,7 @@ type Result struct {
 	ContextRoutePackPath                    string
 	ConformanceExpectationPath              string
 	ManifestPath                            string
+	ManifestSignedPath                      string
 	CoveragePath                            string
 	SimulationPath                          string
 	ValidationPath                          string
@@ -51,6 +52,7 @@ type Result struct {
 	ContextRoutePackSHA256                  string
 	ConformanceExpectationSHA256            string
 	ManifestSHA256                          string
+	ManifestSignedSHA256                    string
 	ResolvedSignedSHA256                    string
 	RuntimeBundleSignedSHA256               string
 	ContextRoutePackSignedSHA256            string
@@ -59,10 +61,12 @@ type Result struct {
 	RuntimeBundleArtifactRef                coreartifact.Ref
 	ContextRoutePackArtifactRef             coreartifact.Ref
 	ConformanceExpectationArtifactRef       coreartifact.Ref
+	ManifestArtifactRef                     coreartifact.Ref
 	ResolvedSignedArtifactRef               coreartifact.Ref
 	RuntimeBundleSignedArtifactRef          coreartifact.Ref
 	ContextRoutePackSignedArtifactRef       coreartifact.Ref
 	ConformanceExpectationSignedArtifactRef coreartifact.Ref
+	ManifestSignedArtifactRef               coreartifact.Ref
 }
 
 type ResolvedPolicy struct {
@@ -161,9 +165,14 @@ type ManifestSpec struct {
 }
 
 type ManifestApproval struct {
-	Status     string    `json:"status"`
-	ApprovedBy string    `json:"approved_by,omitempty"`
-	ApprovedAt time.Time `json:"approved_at,omitempty"`
+	Status        string    `json:"status"`
+	ApprovedBy    string    `json:"approved_by,omitempty"`
+	ApprovedAt    time.Time `json:"approved_at,omitempty"`
+	AuthorityID   string    `json:"authority_id,omitempty"`
+	AuthorityKind string    `json:"authority_kind,omitempty"`
+	Environment   string    `json:"environment,omitempty"`
+	Stage         string    `json:"stage,omitempty"`
+	Scope         string    `json:"scope,omitempty"`
 }
 
 type KNIRef struct {

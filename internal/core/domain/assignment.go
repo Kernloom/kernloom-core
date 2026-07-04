@@ -44,27 +44,46 @@ type KLIQRegistration struct {
 }
 
 type KLIQIdentity struct {
-	IdentityID    string    `json:"identity_id"`
-	KLIQID        string    `json:"kliq_id"`
-	NodeID        string    `json:"node_id"`
-	Environment   string    `json:"environment"`
-	Stage         string    `json:"stage"`
-	Scope         string    `json:"scope"`
-	TrustKeyID    string    `json:"trust_key_id"`
-	PublicKeyPEM  string    `json:"public_key_pem"`
-	CSRPEM        string    `json:"csr_pem,omitempty"`
-	Status        string    `json:"status"`
-	IssuedAt      time.Time `json:"issued_at"`
-	RevokedAt     time.Time `json:"revoked_at,omitempty"`
-	RevokedReason string    `json:"revoked_reason,omitempty"`
+	IdentityID              string    `json:"identity_id"`
+	KLIQID                  string    `json:"kliq_id"`
+	NodeID                  string    `json:"node_id"`
+	Environment             string    `json:"environment"`
+	Stage                   string    `json:"stage"`
+	Scope                   string    `json:"scope"`
+	TrustKeyID              string    `json:"trust_key_id"`
+	PublicKeyPEM            string    `json:"public_key_pem"`
+	CSRPEM                  string    `json:"csr_pem,omitempty"`
+	ServiceIdentityProvider string    `json:"service_identity_provider"`
+	SPIFFEID                string    `json:"spiffe_id,omitempty"`
+	CredentialStatus        string    `json:"credential_status"`
+	CredentialExpiresAt     time.Time `json:"credential_expires_at,omitempty"`
+	Status                  string    `json:"status"`
+	IssuedAt                time.Time `json:"issued_at"`
+	RevokedAt               time.Time `json:"revoked_at,omitempty"`
+	RevokedReason           string    `json:"revoked_reason,omitempty"`
 }
 
 type KLIQManagementProfile struct {
-	ProfileID        string `json:"profile_id"`
-	Mode             string `json:"mode"`
-	PollInterval     string `json:"poll_interval"`
-	StatusEndpoint   string `json:"status_endpoint,omitempty"`
-	AssignmentSource string `json:"assignment_source,omitempty"`
+	Kind               string `json:"kind,omitempty"`
+	ProfileID          string `json:"profile_id"`
+	Mode               string `json:"mode"`
+	PollInterval       string `json:"poll_interval"`
+	HeartbeatInterval  string `json:"heartbeat_interval,omitempty"`
+	StatusInterval     string `json:"status_interval,omitempty"`
+	DecisionInterval   string `json:"decision_interval,omitempty"`
+	ReconcileInterval  string `json:"reconcile_interval,omitempty"`
+	AuditFlushInterval string `json:"audit_flush_interval,omitempty"`
+	StatusEndpoint     string `json:"status_endpoint,omitempty"`
+	AssignmentSource   string `json:"assignment_source,omitempty"`
+}
+
+type KLIQFallbackProfile struct {
+	Kind                          string `json:"kind,omitempty"`
+	ProfileID                     string `json:"profile_id"`
+	Mode                          string `json:"mode"`
+	AllowCachedAssignmentFallback bool   `json:"allow_cached_assignment_fallback"`
+	DenyNewActionsWhenDegraded    bool   `json:"deny_new_actions_when_degraded"`
+	AuditRequired                 bool   `json:"audit_required"`
 }
 
 type KLIQAssignment struct {
@@ -208,6 +227,13 @@ type KLIQAuditUpload struct {
 	PayloadSHA256   string          `json:"payload_sha256"`
 	CreatedAt       time.Time       `json:"created_at"`
 	UploadedAt      time.Time       `json:"uploaded_at"`
+}
+
+type KLIQAuditUploadAck struct {
+	Status        string    `json:"status"`
+	AuditRecordID string    `json:"audit_record_id"`
+	AckID         string    `json:"ack_id"`
+	AckedAt       time.Time `json:"acked_at"`
 }
 
 type KLIQUpdatePlan struct {

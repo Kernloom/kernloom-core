@@ -141,6 +141,19 @@ func TestKLIQEnrollmentAssignmentHeartbeatAndStatusFlow(t *testing.T) {
 	if enrollment.ServiceToken == "" || registration.Identity.PublicKeyPEM == "" {
 		t.Fatalf("expected service token and bound public key, got %#v", enrollment)
 	}
+	if registration.Identity.ServiceIdentityProvider != authn.ServiceIdentityProviderSPIFFEReady || registration.Identity.SPIFFEID == "" || registration.Identity.CredentialStatus != "active" {
+		t.Fatalf("expected spiffe-ready service identity metadata, got %#v", registration.Identity)
+	}
+	principal, err := serviceIssuer.Verify(t.Context(), enrollment.ServiceToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if authn.PrincipalSPIFFEID(principal) != registration.Identity.SPIFFEID || authn.PrincipalServiceIdentityProvider(principal) != registration.Identity.ServiceIdentityProvider {
+		t.Fatalf("expected service token claims to bind registered identity, got %#v", principal)
+	}
+	if authn.PrincipalIdentityMaterialSHA256(principal) != authn.IdentityMaterialSHA256(registration.Identity) {
+		t.Fatalf("expected service token identity material hash to bind registered public key, got %#v", principal)
+	}
 
 	runtimeEnvelope, err := signer.Sign(t.Context(), []byte(`{"kind":"RuntimeBundle","metadata":{"policy_id":"policy.test"}}`), signing.Metadata{
 		SourceCommit: "abc123",
@@ -165,7 +178,7 @@ func TestKLIQEnrollmentAssignmentHeartbeatAndStatusFlow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	approvedBuildRef := putApprovedBuildManifest(t, artifacts, "abc123", map[string]coreartifact.Ref{
+	approvedBuildRef := putApprovedBuildManifest(t, artifacts, signer, "abc123", registration.Environment, registration.Stage, registration.Scope, map[string]coreartifact.Ref{
 		"runtime_bundle": ref,
 	})
 	plan := assignmentPlanRequest{
@@ -288,7 +301,7 @@ func TestProductionAssignmentPlannerRejectsRawArtifactEnvelope(t *testing.T) {
 		t.Fatal(err)
 	}
 	artifacts := artifactstore.NewMemoryStore()
-	approvedBuildRef := putApprovedBuildManifest(t, artifacts, "abc123", nil)
+	approvedBuildRef := putApprovedBuildManifest(t, artifacts, testManagementSigner(t), "abc123", registration.Environment, registration.Stage, registration.Scope, nil)
 	server := Server{
 		Authenticator:  authn.DevTokenVerifier{},
 		Authorizer:     authz.Authorizer{},
@@ -363,6 +376,102 @@ func TestProductionAssignmentPlannerRequiresApprovedBuild(t *testing.T) {
 	}
 }
 
+func TestApprovePolicyBuildManifestMakesPlannerReachable(t *testing.T) {
+	store := management.NewMemoryStore()
+	registration := testRegistration("kliq.approve-build", "node-approve-build")
+	if err := store.Register(t.Context(), registration); err != nil {
+		t.Fatal(err)
+	}
+	signer := testManagementSigner(t)
+	artifacts := artifactstore.NewMemoryStore()
+	runtimeEnvelope, err := signer.Sign(t.Context(), []byte(`{"kind":"RuntimeBundle","metadata":{"policy_id":"policy.test"}}`), signing.Metadata{
+		SourceCommit: "abc123",
+		PolicyID:     "policy.test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimePayload, err := json.Marshal(runtimeEnvelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeRef, err := artifacts.Put(t.Context(), coreartifact.Artifact{
+		Metadata: coreartifact.Metadata{ID: "runtime_bundle.approve-build", PolicyID: "policy.test", ArtifactType: "runtime_bundle_signed_envelope", SourceCommit: "abc123"},
+		Payload:  runtimePayload,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pendingBuildRef := putPendingBuildManifest(t, artifacts, signer, "abc123", map[string]coreartifact.Ref{
+		"runtime_bundle": runtimeRef,
+	})
+	server := Server{
+		Authenticator:  authn.DevTokenVerifier{},
+		Authorizer:     authz.Authorizer{},
+		Store:          jobs.NewMemoryStore(),
+		Management:     store,
+		ManagementSign: signer,
+		Artifacts:      artifacts,
+	}
+	approvalReq := buildApprovalRequest{
+		BuildRef:    pendingBuildRef,
+		Environment: registration.Environment,
+		Stage:       registration.Stage,
+		Scope:       registration.Scope,
+		AuthorityID: "change.review.123",
+	}
+	approvalBody, err := json.Marshal(approvalReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	approvalResp := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/policy-build-manifests/approve", bytes.NewReader(approvalBody))
+	req.Header.Set("Authorization", "Bearer dev:reviewer:policy-reviewer:acme:prod:prod")
+	server.Handler().ServeHTTP(approvalResp, req)
+	if approvalResp.Code != http.StatusCreated {
+		t.Fatalf("expected build approval, got %d: %s", approvalResp.Code, approvalResp.Body.String())
+	}
+	var approved buildApprovalResponse
+	if err := json.Unmarshal(approvalResp.Body.Bytes(), &approved); err != nil {
+		t.Fatal(err)
+	}
+	if approved.ApprovedBuildRef.URI == "" || approved.Manifest.Approval.Status != "approved" || approved.Manifest.Approval.ApprovedBy != "reviewer" {
+		t.Fatalf("expected approved manifest response, got %#v", approved)
+	}
+
+	plan := assignmentPlanRequest{
+		KLIQID:           registration.KLIQID,
+		SourceCommit:     "abc123",
+		ApprovedBuildRef: approved.ApprovedBuildRef,
+		ExpiresAt:        time.Now().Add(time.Hour).UTC(),
+		Artifacts: []domain.KLIQAssignedArtifact{{
+			ArtifactType: "runtime_bundle",
+			ArtifactID:   "runtime_bundle.approve-build",
+			ArtifactRef:  runtimeRef.URI,
+			SHA256:       runtimeRef.SHA256,
+		}},
+	}
+	planBody, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	planResp := httptest.NewRecorder()
+	planReq := httptest.NewRequest(http.MethodPost, "/v1/kliq/assignments", bytes.NewReader(planBody))
+	planReq.Header.Set("Authorization", "Bearer dev:ops:operator:acme:prod:prod")
+	server.Handler().ServeHTTP(planResp, planReq)
+	if planResp.Code != http.StatusCreated {
+		t.Fatalf("expected assignment planner to accept approved build, got %d: %s", planResp.Code, planResp.Body.String())
+	}
+	events, err := store.AuditEvents(t.Context(), "policy_build_manifest", approved.Manifest.Metadata.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := requireAuditEvent(t, events, "policy_build_manifest_approved")
+	if event.Actor != "reviewer" || event.Metadata["authority_id"] != "change.review.123" {
+		t.Fatalf("expected approval audit event, got %#v", event)
+	}
+}
+
 func TestProductionAssignmentPlannerRejectsArtifactOutsideApprovedBuild(t *testing.T) {
 	store := management.NewMemoryStore()
 	registration := testRegistration("kliq.artifact-outside-build", "node-artifact-outside-build")
@@ -389,7 +498,7 @@ func TestProductionAssignmentPlannerRejectsArtifactOutsideApprovedBuild(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	approvedBuildRef := putApprovedBuildManifest(t, artifacts, "abc123", map[string]coreartifact.Ref{})
+	approvedBuildRef := putApprovedBuildManifest(t, artifacts, signer, "abc123", registration.Environment, registration.Stage, registration.Scope, map[string]coreartifact.Ref{})
 	server := Server{
 		Authenticator:  authn.DevTokenVerifier{},
 		Authorizer:     authz.Authorizer{},
@@ -422,6 +531,167 @@ func TestProductionAssignmentPlannerRejectsArtifactOutsideApprovedBuild(t *testi
 
 	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "artifact_not_in_approved_build") {
 		t.Fatalf("expected approved build artifact rejection, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestProductionAssignmentPlannerRejectsUnsignedApprovedBuildManifest(t *testing.T) {
+	store := management.NewMemoryStore()
+	registration := testRegistration("kliq.unsigned-build", "node-unsigned-build")
+	if err := store.Register(t.Context(), registration); err != nil {
+		t.Fatal(err)
+	}
+	signer := testManagementSigner(t)
+	artifacts := artifactstore.NewMemoryStore()
+	envelope, err := signer.Sign(t.Context(), []byte(`{"kind":"RuntimeBundle","metadata":{"policy_id":"policy.test"}}`), signing.Metadata{
+		SourceCommit: "abc123",
+		PolicyID:     "policy.test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, err := artifacts.Put(t.Context(), coreartifact.Artifact{
+		Metadata: coreartifact.Metadata{ID: "runtime_bundle.unsigned-build", PolicyID: "policy.test", ArtifactType: "runtime_bundle_signed_envelope", SourceCommit: "abc123"},
+		Payload:  payload,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest := compiler.PolicyBuildManifest{
+		Kind:     "PolicyBuildManifest",
+		Metadata: compiler.ManifestMetadata{ID: "build.unsigned", CorrelationID: "correlation.test"},
+		Approval: compiler.ManifestApproval{
+			Status:        "approved",
+			ApprovedBy:    "test",
+			ApprovedAt:    time.Now().UTC(),
+			AuthorityID:   "approval-authority.test",
+			AuthorityKind: "forge-management-signature",
+			Environment:   registration.Environment,
+			Stage:         registration.Stage,
+			Scope:         registration.Scope,
+		},
+		Spec: compiler.ManifestSpec{
+			PolicyRepo:         compiler.PolicyRepoRef{Commit: "abc123"},
+			EnterpriseRegistry: compiler.RegistryRef{ContentDigest: "sha256:enterprise-registry"},
+			CoreRegistry:       compiler.RegistryRef{ContentDigest: "sha256:core-registry"},
+			Profile:            compiler.DigestRef{Digest: "sha256:profile"},
+			RiskRecipe:         compiler.DigestRef{Digest: "sha256:risk"},
+			CatalogDigest:      "sha256:catalog",
+			SignedOutputs: map[string]compiler.SignedOutputRef{
+				"runtime_bundle": {ArtifactRef: ref, EnvelopeSHA256: ref.SHA256, PayloadSHA256: "sha256:payload-runtime_bundle", KeyID: signer.KeyID},
+			},
+		},
+	}
+	manifestPayload, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	approvedBuildRef, err := artifacts.Put(t.Context(), coreartifact.Artifact{
+		Metadata: coreartifact.Metadata{ID: manifest.Metadata.ID, PolicyID: "policy.test", ArtifactType: "policy_build_manifest", SourceCommit: "abc123"},
+		Payload:  manifestPayload,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := Server{
+		Authenticator:  authn.DevTokenVerifier{},
+		Authorizer:     authz.Authorizer{},
+		Store:          jobs.NewMemoryStore(),
+		Management:     store,
+		ManagementSign: signer,
+		Artifacts:      artifacts,
+	}
+	plan := assignmentPlanRequest{
+		KLIQID:           registration.KLIQID,
+		SourceCommit:     "abc123",
+		ApprovedBuildRef: approvedBuildRef,
+		ExpiresAt:        time.Now().Add(time.Hour).UTC(),
+		Artifacts: []domain.KLIQAssignedArtifact{{
+			ArtifactType: "runtime_bundle",
+			ArtifactID:   "runtime_bundle.unsigned-build",
+			ArtifactRef:  ref.URI,
+			SHA256:       ref.SHA256,
+		}},
+	}
+	body, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/kliq/assignments", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer dev:ops:operator:acme:prod:prod")
+	rec := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "approved_build_must_be_signed") {
+		t.Fatalf("expected unsigned approved build rejection, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestProductionAssignmentPlannerRejectsApprovedBuildScopeMismatch(t *testing.T) {
+	store := management.NewMemoryStore()
+	registration := testRegistration("kliq.scope-build", "node-scope-build")
+	if err := store.Register(t.Context(), registration); err != nil {
+		t.Fatal(err)
+	}
+	signer := testManagementSigner(t)
+	artifacts := artifactstore.NewMemoryStore()
+	envelope, err := signer.Sign(t.Context(), []byte(`{"kind":"RuntimeBundle","metadata":{"policy_id":"policy.test"}}`), signing.Metadata{
+		SourceCommit: "abc123",
+		PolicyID:     "policy.test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, err := artifacts.Put(t.Context(), coreartifact.Artifact{
+		Metadata: coreartifact.Metadata{ID: "runtime_bundle.scope-build", PolicyID: "policy.test", ArtifactType: "runtime_bundle_signed_envelope", SourceCommit: "abc123"},
+		Payload:  payload,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	approvedBuildRef := putApprovedBuildManifest(t, artifacts, signer, "abc123", registration.Environment, registration.Stage, "other-scope", map[string]coreartifact.Ref{
+		"runtime_bundle": ref,
+	})
+	server := Server{
+		Authenticator:  authn.DevTokenVerifier{},
+		Authorizer:     authz.Authorizer{},
+		Store:          jobs.NewMemoryStore(),
+		Management:     store,
+		ManagementSign: signer,
+		Artifacts:      artifacts,
+	}
+	plan := assignmentPlanRequest{
+		KLIQID:           registration.KLIQID,
+		SourceCommit:     "abc123",
+		ApprovedBuildRef: approvedBuildRef,
+		ExpiresAt:        time.Now().Add(time.Hour).UTC(),
+		Artifacts: []domain.KLIQAssignedArtifact{{
+			ArtifactType: "runtime_bundle",
+			ArtifactID:   "runtime_bundle.scope-build",
+			ArtifactRef:  ref.URI,
+			SHA256:       ref.SHA256,
+		}},
+	}
+	body, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/kliq/assignments", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer dev:ops:operator:acme:prod:prod")
+	rec := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "approved_build_scope_mismatch") {
+		t.Fatalf("expected approved build scope mismatch, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -513,7 +783,7 @@ func TestRevokedKLIQCannotFetchAssignment(t *testing.T) {
 		t.Fatal(err)
 	}
 	issuer := &authn.KLIQServiceTokenIssuer{Secret: []byte("test-kliq-service-secret")}
-	token, err := issuer.Issue(registration.KLIQID, registration.Environment, registration.Stage, registration.Scope, time.Hour)
+	token, err := issuer.IssueForIdentity(registration.Identity, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -546,7 +816,7 @@ func TestRevokedKLIQCannotSendHealthyStatus(t *testing.T) {
 		t.Fatal(err)
 	}
 	issuer := &authn.KLIQServiceTokenIssuer{Secret: []byte("test-kliq-service-secret")}
-	token, err := issuer.Issue(registration.KLIQID, registration.Environment, registration.Stage, registration.Scope, time.Hour)
+	token, err := issuer.IssueForIdentity(registration.Identity, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -575,7 +845,7 @@ func TestKLIQServiceCanRefreshOwnToken(t *testing.T) {
 		t.Fatal(err)
 	}
 	issuer := &authn.KLIQServiceTokenIssuer{Secret: []byte("test-kliq-service-secret")}
-	token, err := issuer.Issue(registration.KLIQID, registration.Environment, registration.Stage, registration.Scope, time.Hour)
+	token, err := issuer.IssueForIdentity(registration.Identity, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -744,7 +1014,26 @@ func requireAuditEvent(t *testing.T, events []domain.ManagementAuditEvent, event
 	return domain.ManagementAuditEvent{}
 }
 
-func putApprovedBuildManifest(t *testing.T, store *artifactstore.MemoryStore, sourceCommit string, outputs map[string]coreartifact.Ref) coreartifact.Ref {
+func putApprovedBuildManifest(t *testing.T, store *artifactstore.MemoryStore, signer *signing.DevLocalSigner, sourceCommit, environment, stage, scope string, outputs map[string]coreartifact.Ref) coreartifact.Ref {
+	t.Helper()
+	return putBuildManifest(t, store, signer, sourceCommit, compiler.ManifestApproval{
+		Status:        "approved",
+		ApprovedBy:    "test",
+		ApprovedAt:    time.Now().UTC(),
+		AuthorityID:   "approval-authority.test",
+		AuthorityKind: "forge-management-signature",
+		Environment:   environment,
+		Stage:         stage,
+		Scope:         scope,
+	}, outputs)
+}
+
+func putPendingBuildManifest(t *testing.T, store *artifactstore.MemoryStore, signer *signing.DevLocalSigner, sourceCommit string, outputs map[string]coreartifact.Ref) coreartifact.Ref {
+	t.Helper()
+	return putBuildManifest(t, store, signer, sourceCommit, compiler.ManifestApproval{Status: "pending_review"}, outputs)
+}
+
+func putBuildManifest(t *testing.T, store *artifactstore.MemoryStore, signer *signing.DevLocalSigner, sourceCommit string, approval compiler.ManifestApproval, outputs map[string]coreartifact.Ref) coreartifact.Ref {
 	t.Helper()
 	if outputs == nil {
 		outputs = map[string]coreartifact.Ref{}
@@ -759,11 +1048,7 @@ func putApprovedBuildManifest(t *testing.T, store *artifactstore.MemoryStore, so
 			ID:            "build.test." + strings.ReplaceAll(sourceCommit, "/", "-"),
 			CorrelationID: "correlation.test",
 		},
-		Approval: compiler.ManifestApproval{
-			Status:     "approved",
-			ApprovedBy: "test",
-			ApprovedAt: time.Now().UTC(),
-		},
+		Approval: approval,
 		Spec: compiler.ManifestSpec{
 			PolicyRepo: compiler.PolicyRepoRef{
 				Repo:           "enterprise-kernloom-policies",
@@ -784,14 +1069,22 @@ func putApprovedBuildManifest(t *testing.T, store *artifactstore.MemoryStore, so
 	if err != nil {
 		t.Fatal(err)
 	}
+	envelope, err := signer.Sign(t.Context(), payload, signing.Metadata{SourceCommit: sourceCommit})
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelopePayload, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
 	ref, err := store.Put(t.Context(), coreartifact.Artifact{
 		Metadata: coreartifact.Metadata{
 			ID:           manifest.Metadata.ID,
 			PolicyID:     "policy.test",
-			ArtifactType: "policy_build_manifest",
+			ArtifactType: "policy_build_manifest_signed_envelope",
 			SourceCommit: sourceCommit,
 		},
-		Payload: payload,
+		Payload: envelopePayload,
 	})
 	if err != nil {
 		t.Fatal(err)

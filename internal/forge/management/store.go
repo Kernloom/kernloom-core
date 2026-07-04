@@ -251,6 +251,12 @@ func (s *MemoryStore) Register(ctx context.Context, registration domain.KLIQRegi
 	if registration.Identity.Status == "" {
 		registration.Identity.Status = "active"
 	}
+	if registration.Identity.ServiceIdentityProvider == "" {
+		registration.Identity.ServiceIdentityProvider = "spiffe-ready"
+	}
+	if registration.Identity.CredentialStatus == "" {
+		registration.Identity.CredentialStatus = "active"
+	}
 	if registration.Identity.IssuedAt.IsZero() {
 		registration.Identity.IssuedAt = registration.RegisteredAt
 	}
@@ -316,6 +322,7 @@ func (s *MemoryStore) RevokeKLIQ(ctx context.Context, kliqID, reason string, rev
 	s.registrations[kliqID] = registration
 	identity := s.identities[kliqID]
 	identity.Status = "revoked"
+	identity.CredentialStatus = "revoked"
 	identity.RevokedAt = revokedAt.UTC()
 	identity.RevokedReason = reason
 	s.identities[kliqID] = identity

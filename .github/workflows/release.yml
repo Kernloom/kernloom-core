@@ -1,0 +1,35 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  build-sign-sbom:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+      - uses: sigstore/cosign-installer@v3
+      - run: make build
+      - run: mkdir -p dist
+      - run: cp bin/* dist/
+      - run: sha256sum dist/* > dist/checksums.txt
+      - uses: anchore/sbom-action@v0
+        with:
+          path: .
+          format: spdx-json
+          output-file: dist/kernloom-core.spdx.json
+      - run: cosign sign-blob --yes --output-signature dist/checksums.txt.sig --output-certificate dist/checksums.txt.pem dist/checksums.txt
+      - run: cosign sign-blob --yes --output-signature dist/kernloom-core.spdx.json.sig --output-certificate dist/kernloom-core.spdx.json.pem dist/kernloom-core.spdx.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kernloom-core-release-artifacts
+          path: dist/

@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -23,7 +24,7 @@ import (
 
 func TestKLIQRunManagedOncePollsAssignmentAndReports(t *testing.T) {
 	ctx := context.Background()
-	now := time.Date(2026, 7, 4, 12, 0, 0, 0, time.UTC)
+	now := time.Now().UTC()
 	keyPath := filepath.Join(t.TempDir(), "management.ed25519.json")
 	signer := runTestSigner(t, keyPath, now)
 	runtimeEnvelope := runTestSignedBundleJSON(t, signer, now, now.Add(time.Hour))
@@ -92,12 +93,13 @@ func TestKLIQRunManagedOncePollsAssignmentAndReports(t *testing.T) {
 	}
 
 	if err := runKLIQ(ctx, runOptions{
-		Mode:               kliqRunModeManaged,
-		StatePath:          statePath,
-		TrustBundlePath:    keyPath,
-		DevAllowPrivateKey: true,
-		Once:               true,
-		HTTPClient:         server.Client(),
+		Mode:                      kliqRunModeManaged,
+		StatePath:                 statePath,
+		TrustBundlePath:           keyPath,
+		DevAllowPrivateKey:        true,
+		DevInsecureForgeTransport: true,
+		Once:                      true,
+		HTTPClient:                server.Client(),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -120,7 +122,7 @@ func TestKLIQRunManagedOncePollsAssignmentAndReports(t *testing.T) {
 
 func TestKLIQRunStandaloneOnceLoadsBundleWithRuntimeCore(t *testing.T) {
 	ctx := context.Background()
-	now := time.Date(2026, 7, 4, 12, 0, 0, 0, time.UTC)
+	now := time.Now().UTC()
 	keyPath := filepath.Join(t.TempDir(), "management.ed25519.json")
 	signer := runTestSigner(t, keyPath, now)
 	bundlePath := filepath.Join(t.TempDir(), "runtime_bundle.signed.json")
@@ -192,6 +194,41 @@ func TestRuntimeDecisionSourceFromFileReadsArray(t *testing.T) {
 	}
 }
 
+func TestRuntimeDecisionSourceFromFileReadsLocalRuntimeEvent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.json")
+	data := []byte(`{
+		"kind": "LocalRuntimeEvent",
+		"event_id": "event.local.1",
+		"event_type": "baseline_deviation",
+		"adapter_id": "adapter.test",
+		"capability_id": "capability.test",
+		"capability_grant_id": "grant.test",
+		"action_type": "runtime_action.deny_temporarily_source",
+		"target_scope": "source",
+		"target_key": "192.0.2.10",
+		"ttl": "30s",
+		"reason": "local event source smoke",
+		"correlation_id": "correlation.local.event"
+	}`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	source, err := runtimeDecisionSourceFromFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, ok, err := source.NextDecision(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || !strings.HasPrefix(req.DecisionID, "runtime_decision.") || req.AdapterID != "adapter.test" || req.AuditID == "" {
+		t.Fatalf("unexpected local runtime event decision result ok=%v req=%#v", ok, req)
+	}
+	if req.CorrelationID != "correlation.local.event" || req.Reason != "local event source smoke" {
+		t.Fatalf("expected event metadata to propagate, got %#v", req)
+	}
+}
+
 func TestKLIQRunFlushesAuditSpoolToForge(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 4, 12, 0, 0, 0, time.UTC)
@@ -212,6 +249,12 @@ func TestKLIQRunFlushesAuditSpoolToForge(t *testing.T) {
 		}
 		uploads.Add(1)
 		w.WriteHeader(http.StatusAccepted)
+		_ = json.NewEncoder(w).Encode(domain.KLIQAuditUploadAck{
+			Status:        "accepted",
+			AuditRecordID: upload.AuditRecordID,
+			AckID:         "ack.test",
+			AckedAt:       now,
+		})
 	}))
 	defer server.Close()
 	statePath := filepath.Join(t.TempDir(), "state.db")
@@ -247,7 +290,7 @@ func TestKLIQRunFlushesAuditSpoolToForge(t *testing.T) {
 		t.Fatal(err)
 	}
 	daemon := &runDaemon{
-		opts:       runOptions{Mode: kliqRunModeManaged},
+		opts:       runOptions{Mode: kliqRunModeManaged, DevInsecureForgeTransport: true},
 		store:      store,
 		credential: mustKLIQCredential(t, store),
 		httpClient: server.Client(),

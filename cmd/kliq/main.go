@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -18,7 +19,6 @@ import (
 	kliqbundle "github.com/kernloom/kernloom-core/internal/kliq/bundle"
 	kliqruntime "github.com/kernloom/kernloom-core/internal/kliq/runtime"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 )
 
 const defaultStatePath = "./var/kernloom/kliq/state.db"
@@ -80,24 +80,29 @@ func main() {
 		auditPendingCmd(os.Args[3:])
 		return
 	}
+	if len(os.Args) > 2 && os.Args[1] == "audit" && os.Args[2] == "export" {
+		auditExportCmd(os.Args[3:])
+		return
+	}
 	fmt.Println(version.Binary("kliq"))
 	fmt.Println("production daemon:")
-	fmt.Println("  kliq run --mode managed --forge-url http://127.0.0.1:8080 [--state ./var/kernloom/kliq/state.db] [--status-listen 127.0.0.1:18090]")
+	fmt.Println("  kliq run --mode managed --forge-url https://forge.example [--state ./var/kernloom/kliq/state.db] [--status-listen 127.0.0.1:18090]")
 	fmt.Println("  kliq run --mode standalone --bundle-source file://path [--state ./var/kernloom/kliq/state.db] [--status-listen 127.0.0.1:18090]")
 	fmt.Println("admin/debug/smoke:")
-	fmt.Println("  kliq run --mode managed --forge-url http://127.0.0.1:8080 --adapter id=host:port  # dev/bootstrap adapter override")
-	fmt.Println("  kliq enroll --forge http://127.0.0.1:8080 --enrollment-token token --node-id node --environment env --stage stage --scope scope [--state ./var/kernloom/kliq/state.db]")
+	fmt.Println("  kliq run --mode managed --forge-url http://127.0.0.1:8080 --dev-insecure-forge-transport --adapter id=host:port --dev-insecure-adapter-transport  # dev/bootstrap only")
+	fmt.Println("  kliq enroll --forge http://127.0.0.1:8080 --dev-insecure-forge-transport --enrollment-token token --node-id node --environment env --stage stage --scope scope [--state ./var/kernloom/kliq/state.db]")
 	fmt.Println("  kliq verify-bundle --bundle path --trust-bundle path")
 	fmt.Println("  kliq load-bundle --bundle path --trust-bundle path [--state ./var/kernloom/kliq/state.db]")
-	fmt.Println("  kliq load-managed-bundle --assignment-url http://127.0.0.1:8080 --bearer-token token --kliq-id id --environment env --stage stage --scope scope --trust-key-id key --trust-bundle path [--state ./var/kernloom/kliq/state.db]")
-	fmt.Println("  kliq execute-action --trust-bundle path --adapter-id id --adapter-addr host:port --capability-id id --capability-grant-id id --decision-id id --action-type id --target-key value --reason text [--audit-id id|--derive-audit-id] [--state path] [--target-scope scope] [--ttl 1m] [--mode required] [--correlation-id id]")
-	fmt.Println("  kliq reconcile --trust-bundle path --adapter-id id --adapter-addr host:port [--state ./var/kernloom/kliq/state.db] [--dry-run]")
+	fmt.Println("  kliq load-managed-bundle --assignment-url http://127.0.0.1:8080 --dev-insecure-forge-transport --bearer-token token --kliq-id id --environment env --stage stage --scope scope --trust-key-id key --trust-bundle path [--state ./var/kernloom/kliq/state.db]")
+	fmt.Println("  kliq execute-action --trust-bundle path --adapter-id id --adapter-addr host:port --capability-id id --capability-grant-id id --decision-id id --action-type id --target-key value --reason text [--audit-id id|--derive-audit-id] [--state path] [--target-scope scope] [--ttl 1m] [--mode required] [--correlation-id id] [--adapter-ca ca.pem --adapter-client-cert cert.pem --adapter-client-key key.pem]")
+	fmt.Println("  kliq reconcile --trust-bundle path --adapter-id id --adapter-addr host:port [--state ./var/kernloom/kliq/state.db] [--dry-run] [--adapter-ca ca.pem --adapter-client-cert cert.pem --adapter-client-key key.pem]")
 	fmt.Println("  kliq status [--state ./var/kernloom/kliq/state.db]")
 	fmt.Println("  kliq bundle status [--state ./var/kernloom/kliq/state.db]")
 	fmt.Println("  kliq adapters status [--state ./var/kernloom/kliq/state.db]")
 	fmt.Println("  kliq runtime actions [--state ./var/kernloom/kliq/state.db]")
 	fmt.Println("  kliq runtime journal --action-id id [--state ./var/kernloom/kliq/state.db]")
 	fmt.Println("  kliq audit pending [--state ./var/kernloom/kliq/state.db]")
+	fmt.Println("  kliq audit export [--state ./var/kernloom/kliq/state.db] [--output path] [--include-payload]")
 	fmt.Println("  kliq status-api [--state ./var/kernloom/kliq/state.db] [--listen 127.0.0.1:18090]")
 }
 
@@ -176,6 +181,7 @@ func loadManagedBundle(args []string) {
 	trustKeyID := fs.String("trust-key-id", "", "trusted assignment signing key id")
 	trustBundlePath := fs.String("trust-bundle", defaultTrustBundlePath, "path to public trust bundle")
 	devAllowPrivateTrustKey := fs.Bool("dev-allow-private-trust-key", false, "allow dev-local key files containing private material; never use in production")
+	devInsecureForgeTransport := fs.Bool("dev-insecure-forge-transport", false, "allow plaintext http Forge transport; dev/smoke only")
 	statePath := fs.String("state", defaultStatePath, "path to KLIQ local SQLite state")
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -213,6 +219,10 @@ func loadManagedBundle(args []string) {
 	}
 	if *assignmentURL == "" || *bearerToken == "" || *kliqID == "" || *environment == "" || *stage == "" || *scope == "" || *trustKeyID == "" || *trustBundlePath == "" {
 		fmt.Fprintln(os.Stderr, "kliq load-managed-bundle requires --assignment-url, --bearer-token, --kliq-id, --environment, --stage, --scope, --trust-key-id and --trust-bundle")
+		os.Exit(2)
+	}
+	if err := validateSecureForgeURL(*assignmentURL, *devInsecureForgeTransport); err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
 	manager, closeStore := managerOrExit(*statePath, *trustBundlePath, *devAllowPrivateTrustKey, nil)
@@ -261,6 +271,12 @@ func executeAction(args []string) {
 	auditID := fs.String("audit-id", "", "audit id")
 	correlationID := fs.String("correlation-id", "", "correlation id for runtime logs, adapter requests and evidence")
 	deriveAuditID := fs.Bool("derive-audit-id", false, "derive audit id from non-empty decision id")
+	adapterTransport := adapterTransportOptions{}
+	fs.BoolVar(&adapterTransport.DevInsecureAdapterTransport, "dev-insecure-adapter-transport", false, "allow plaintext adapter gRPC transport; dev/smoke only")
+	fs.StringVar(&adapterTransport.CAPath, "adapter-ca", "", "adapter mTLS CA bundle")
+	fs.StringVar(&adapterTransport.ClientCertPath, "adapter-client-cert", "", "adapter mTLS client certificate")
+	fs.StringVar(&adapterTransport.ClientKeyPath, "adapter-client-key", "", "adapter mTLS client private key")
+	fs.StringVar(&adapterTransport.ServerName, "adapter-server-name", "", "expected adapter TLS server name")
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
@@ -273,7 +289,7 @@ func executeAction(args []string) {
 		fmt.Fprintln(os.Stderr, "kliq execute-action requires --audit-id or --derive-audit-id")
 		os.Exit(2)
 	}
-	registry, closeAdapters := adapterRegistryOrExit(*adapterID, *adapterAddr)
+	registry, closeAdapters := adapterRegistryOrExit(*adapterID, *adapterAddr, adapterTransport)
 	defer closeAdapters()
 	manager, closeStore := managerOrExit(*statePath, *trustBundlePath, *devAllowPrivateTrustKey, registry)
 	defer closeStore()
@@ -322,6 +338,12 @@ func reconcile(args []string) {
 	adapterID := fs.String("adapter-id", "", "runtime adapter id")
 	adapterAddr := fs.String("adapter-addr", "", "runtime adapter gRPC address")
 	dryRun := fs.Bool("dry-run", false, "inspect reconciliation work without adapter calls or state mutations")
+	adapterTransport := adapterTransportOptions{}
+	fs.BoolVar(&adapterTransport.DevInsecureAdapterTransport, "dev-insecure-adapter-transport", false, "allow plaintext adapter gRPC transport; dev/smoke only")
+	fs.StringVar(&adapterTransport.CAPath, "adapter-ca", "", "adapter mTLS CA bundle")
+	fs.StringVar(&adapterTransport.ClientCertPath, "adapter-client-cert", "", "adapter mTLS client certificate")
+	fs.StringVar(&adapterTransport.ClientKeyPath, "adapter-client-key", "", "adapter mTLS client private key")
+	fs.StringVar(&adapterTransport.ServerName, "adapter-server-name", "", "expected adapter TLS server name")
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
@@ -344,7 +366,7 @@ func reconcile(args []string) {
 		fmt.Fprintln(os.Stderr, "kliq reconcile requires --trust-bundle, --adapter-id and --adapter-addr")
 		os.Exit(2)
 	}
-	registry, closeAdapters := adapterRegistryOrExit(*adapterID, *adapterAddr)
+	registry, closeAdapters := adapterRegistryOrExit(*adapterID, *adapterAddr, adapterTransport)
 	defer closeAdapters()
 	manager, closeStore := managerOrExit(*statePath, *trustBundlePath, *devAllowPrivateTrustKey, registry)
 	defer closeStore()
@@ -467,6 +489,59 @@ func auditPendingCmd(args []string) {
 	printAuditRecords(auditRecordViews(records))
 }
 
+type auditExportDocument struct {
+	Kind           string      `json:"kind"`
+	ExportedAt     string      `json:"exported_at"`
+	Redacted       bool        `json:"redacted"`
+	PendingRecords int         `json:"pending_records"`
+	Records        interface{} `json:"records"`
+}
+
+func auditExportCmd(args []string) {
+	fs := flag.NewFlagSet("kliq audit export", flag.ExitOnError)
+	statePath := fs.String("state", defaultStatePath, "path to KLIQ local SQLite state")
+	outputPath := fs.String("output", "", "optional output path; defaults to stdout")
+	includePayload := fs.Bool("include-payload", false, "include full local audit payloads; use only for controlled retention export")
+	if err := fs.Parse(args); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	store, closeStore := stateStoreOrExit(*statePath)
+	defer closeStore()
+	records, err := store.PendingAudits(context.Background())
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	doc := auditExportDocument{
+		Kind:           "KLIQAuditSpoolExport",
+		ExportedAt:     time.Now().UTC().Format(time.RFC3339Nano),
+		Redacted:       !*includePayload,
+		PendingRecords: len(records),
+		Records:        auditRecordViews(records),
+	}
+	if *includePayload {
+		doc.Records = records
+	}
+	var output *os.File
+	if *outputPath == "" {
+		output = os.Stdout
+	} else {
+		output, err = os.OpenFile(*outputPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		defer output.Close()
+	}
+	encoder := json.NewEncoder(output)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(doc); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
 func managerOrExit(statePath, trustBundlePath string, allowPrivateDevMaterial bool, registry kliqruntime.AdapterRuntimeRegistry) (kliqruntime.Manager, func()) {
 	store, closeStore := stateStoreOrExit(statePath)
 	verifier, trustBundle, err := loadTrustVerifierForStore(context.Background(), trustBundlePath, allowPrivateDevMaterial, store)
@@ -495,9 +570,14 @@ func stateStoreOrExit(statePath string) (*actionstate.SQLiteStore, func()) {
 	}
 }
 
-func adapterRegistryOrExit(adapterID, adapterAddr string) (kliqruntime.AdapterRuntimeRegistry, func()) {
+func adapterRegistryOrExit(adapterID, adapterAddr string, transport adapterTransportOptions) (kliqruntime.AdapterRuntimeRegistry, func()) {
 	var conn *grpc.ClientConn
-	conn, err := grpc.NewClient(adapterAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	dialOptions, err := adapterDialOptions(transport)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	conn, err = grpc.NewClient(adapterAddr, dialOptions...)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

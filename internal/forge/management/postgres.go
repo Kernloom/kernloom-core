@@ -44,8 +44,47 @@ func (s *PostgresStore) Close() error {
 }
 
 func (s *PostgresStore) migrate(ctx context.Context) error {
-	statements := []string{
-		`CREATE TABLE IF NOT EXISTS kliq_enrollment_tokens (
+	if _, err := s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
+		version INTEGER PRIMARY KEY,
+		name TEXT NOT NULL,
+		applied_at TIMESTAMPTZ NOT NULL
+	)`); err != nil {
+		return err
+	}
+	for _, migration := range postgresMigrations() {
+		applied, err := s.migrationApplied(ctx, migration.Version)
+		if err != nil {
+			return err
+		}
+		if applied {
+			continue
+		}
+		for _, statement := range migration.Statements {
+			if _, err := s.db.ExecContext(ctx, statement); err != nil {
+				return fmt.Errorf("postgres migration %03d %s failed: %w", migration.Version, migration.Name, err)
+			}
+		}
+		if _, err := s.db.ExecContext(ctx, `INSERT INTO schema_migrations (version, name, applied_at) VALUES ($1, $2, $3)`,
+			migration.Version, migration.Name, time.Now().UTC()); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+type postgresMigration struct {
+	Version    int
+	Name       string
+	Statements []string
+}
+
+func postgresMigrations() []postgresMigration {
+	return []postgresMigration{
+		{
+			Version: 1,
+			Name:    "managed_kliq_core",
+			Statements: []string{
+				`CREATE TABLE IF NOT EXISTS kliq_enrollment_tokens (
 			token_id TEXT PRIMARY KEY,
 			token_sha256 TEXT NOT NULL UNIQUE,
 			environment TEXT NOT NULL,
@@ -58,7 +97,7 @@ func (s *PostgresStore) migrate(ctx context.Context) error {
 			revoked_reason TEXT NOT NULL DEFAULT '',
 			token_json JSONB NOT NULL
 		)`,
-		`CREATE TABLE IF NOT EXISTS kliq_registrations (
+				`CREATE TABLE IF NOT EXISTS kliq_registrations (
 			kliq_id TEXT PRIMARY KEY,
 			registration_id TEXT NOT NULL UNIQUE,
 			node_id TEXT NOT NULL,
@@ -71,7 +110,7 @@ func (s *PostgresStore) migrate(ctx context.Context) error {
 			revoked_reason TEXT NOT NULL DEFAULT '',
 			registration_json JSONB NOT NULL
 		)`,
-		`CREATE TABLE IF NOT EXISTS kliq_identities (
+				`CREATE TABLE IF NOT EXISTS kliq_identities (
 			identity_id TEXT PRIMARY KEY,
 			kliq_id TEXT NOT NULL UNIQUE REFERENCES kliq_registrations(kliq_id),
 			node_id TEXT NOT NULL,
@@ -81,13 +120,17 @@ func (s *PostgresStore) migrate(ctx context.Context) error {
 			trust_key_id TEXT NOT NULL,
 			public_key_pem TEXT NOT NULL,
 			csr_pem TEXT NOT NULL DEFAULT '',
+			service_identity_provider TEXT NOT NULL DEFAULT '',
+			spiffe_id TEXT NOT NULL DEFAULT '',
+			credential_status TEXT NOT NULL DEFAULT '',
+			credential_expires_at TIMESTAMPTZ,
 			status TEXT NOT NULL,
 			issued_at TIMESTAMPTZ NOT NULL,
 			revoked_at TIMESTAMPTZ,
 			revoked_reason TEXT NOT NULL DEFAULT '',
 			identity_json JSONB NOT NULL
 		)`,
-		`CREATE TABLE IF NOT EXISTS trust_bundles (
+				`CREATE TABLE IF NOT EXISTS trust_bundles (
 			key_id TEXT PRIMARY KEY,
 			public_key TEXT NOT NULL,
 			purpose TEXT NOT NULL,
@@ -96,7 +139,7 @@ func (s *PostgresStore) migrate(ctx context.Context) error {
 			issuer TEXT NOT NULL,
 			trust_bundle_json JSONB NOT NULL
 		)`,
-		`CREATE TABLE IF NOT EXISTS kliq_assignments (
+				`CREATE TABLE IF NOT EXISTS kliq_assignments (
 			kliq_id TEXT NOT NULL REFERENCES kliq_registrations(kliq_id),
 			assignment_version BIGINT NOT NULL,
 			assignment_id TEXT NOT NULL,
@@ -110,7 +153,7 @@ func (s *PostgresStore) migrate(ctx context.Context) error {
 			envelope_json JSONB NOT NULL,
 			PRIMARY KEY (kliq_id, assignment_version)
 		)`,
-		`CREATE TABLE IF NOT EXISTS kliq_assignment_artifacts (
+				`CREATE TABLE IF NOT EXISTS kliq_assignment_artifacts (
 			kliq_id TEXT NOT NULL,
 			assignment_version BIGINT NOT NULL,
 			artifact_type TEXT NOT NULL,
@@ -120,7 +163,7 @@ func (s *PostgresStore) migrate(ctx context.Context) error {
 			artifact_json JSONB NOT NULL,
 			PRIMARY KEY (kliq_id, assignment_version, artifact_type, artifact_id)
 		)`,
-		`CREATE TABLE IF NOT EXISTS kliq_heartbeats (
+				`CREATE TABLE IF NOT EXISTS kliq_heartbeats (
 			kliq_id TEXT PRIMARY KEY REFERENCES kliq_registrations(kliq_id),
 			environment TEXT NOT NULL,
 			stage TEXT NOT NULL,
@@ -130,7 +173,7 @@ func (s *PostgresStore) migrate(ctx context.Context) error {
 			reported_at TIMESTAMPTZ NOT NULL,
 			heartbeat_json JSONB NOT NULL
 		)`,
-		`CREATE TABLE IF NOT EXISTS kliq_status_reports (
+				`CREATE TABLE IF NOT EXISTS kliq_status_reports (
 			kliq_id TEXT PRIMARY KEY REFERENCES kliq_registrations(kliq_id),
 			environment TEXT NOT NULL,
 			stage TEXT NOT NULL,
@@ -140,7 +183,7 @@ func (s *PostgresStore) migrate(ctx context.Context) error {
 			reported_at TIMESTAMPTZ NOT NULL,
 			status_report_json JSONB NOT NULL
 		)`,
-		`CREATE TABLE IF NOT EXISTS kliq_revocations (
+				`CREATE TABLE IF NOT EXISTS kliq_revocations (
 			revocation_id TEXT PRIMARY KEY,
 			target_type TEXT NOT NULL,
 			target_id TEXT NOT NULL,
@@ -149,7 +192,7 @@ func (s *PostgresStore) migrate(ctx context.Context) error {
 			created_by TEXT NOT NULL DEFAULT '',
 			revocation_json JSONB NOT NULL
 		)`,
-		`CREATE TABLE IF NOT EXISTS management_audit_events (
+				`CREATE TABLE IF NOT EXISTS management_audit_events (
 			event_id TEXT PRIMARY KEY,
 			event_type TEXT NOT NULL,
 			actor TEXT NOT NULL DEFAULT '',
@@ -162,13 +205,28 @@ func (s *PostgresStore) migrate(ctx context.Context) error {
 			created_at TIMESTAMPTZ NOT NULL,
 			event_json JSONB NOT NULL
 		)`,
+			},
+		},
+		{
+			Version: 2,
+			Name:    "service_identity_columns",
+			Statements: []string{
+				`ALTER TABLE kliq_identities ADD COLUMN IF NOT EXISTS service_identity_provider TEXT NOT NULL DEFAULT ''`,
+				`ALTER TABLE kliq_identities ADD COLUMN IF NOT EXISTS spiffe_id TEXT NOT NULL DEFAULT ''`,
+				`ALTER TABLE kliq_identities ADD COLUMN IF NOT EXISTS credential_status TEXT NOT NULL DEFAULT ''`,
+				`ALTER TABLE kliq_identities ADD COLUMN IF NOT EXISTS credential_expires_at TIMESTAMPTZ`,
+			},
+		},
 	}
-	for _, statement := range statements {
-		if _, err := s.db.ExecContext(ctx, statement); err != nil {
-			return err
-		}
+}
+
+func (s *PostgresStore) migrationApplied(ctx context.Context, version int) (bool, error) {
+	var found int
+	err := s.db.QueryRowContext(ctx, `SELECT 1 FROM schema_migrations WHERE version = $1`, version).Scan(&found)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
 	}
-	return nil
+	return err == nil, err
 }
 
 func (s *PostgresStore) CreateEnrollmentToken(ctx context.Context, token domain.KLIQEnrollmentToken, secret string) error {
@@ -288,6 +346,12 @@ func (s *PostgresStore) Register(ctx context.Context, registration domain.KLIQRe
 	if registration.Identity.Status == "" {
 		registration.Identity.Status = "active"
 	}
+	if registration.Identity.ServiceIdentityProvider == "" {
+		registration.Identity.ServiceIdentityProvider = "spiffe-ready"
+	}
+	if registration.Identity.CredentialStatus == "" {
+		registration.Identity.CredentialStatus = "active"
+	}
 	if registration.Identity.IssuedAt.IsZero() {
 		registration.Identity.IssuedAt = registration.RegisteredAt
 	}
@@ -312,11 +376,13 @@ func (s *PostgresStore) Register(ctx context.Context, registration domain.KLIQRe
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO kliq_identities
-		(identity_id, kliq_id, node_id, environment, stage, scope, trust_key_id, public_key_pem, csr_pem, status, issued_at, identity_json)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+		(identity_id, kliq_id, node_id, environment, stage, scope, trust_key_id, public_key_pem, csr_pem,
+		 service_identity_provider, spiffe_id, credential_status, credential_expires_at, status, issued_at, identity_json)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
 		registration.Identity.IdentityID, registration.KLIQID, registration.NodeID, registration.Environment, registration.Stage,
 		registration.Scope, registration.Identity.TrustKeyID, registration.Identity.PublicKeyPEM, registration.Identity.CSRPEM,
-		registration.Identity.Status, registration.Identity.IssuedAt, identityJSON); err != nil {
+		registration.Identity.ServiceIdentityProvider, registration.Identity.SPIFFEID, registration.Identity.CredentialStatus,
+		nullTime(registration.Identity.CredentialExpiresAt), registration.Identity.Status, registration.Identity.IssuedAt, identityJSON); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
@@ -382,7 +448,9 @@ func (s *PostgresStore) RevokeKLIQ(ctx context.Context, kliqID, reason string, r
 		registration.RevokedAt, reason, registrationJSON, kliqID); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE kliq_identities SET status = 'revoked', revoked_at = $1, revoked_reason = $2, identity_json = $3 WHERE kliq_id = $4`,
+	if _, err := tx.ExecContext(ctx, `UPDATE kliq_identities
+		SET status = 'revoked', credential_status = 'revoked', revoked_at = $1, revoked_reason = $2, identity_json = $3
+		WHERE kliq_id = $4`,
 		registration.Identity.RevokedAt, reason, identityJSON, kliqID); err != nil {
 		return err
 	}
@@ -700,4 +768,11 @@ func auditEvent(ctx context.Context, eventType, targetType, targetID, kliqID, en
 		Metadata:    auditMetadata(ctx, metadata),
 		CreatedAt:   createdAt,
 	}
+}
+
+func nullTime(value time.Time) any {
+	if value.IsZero() {
+		return nil
+	}
+	return value.UTC()
 }

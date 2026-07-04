@@ -20,12 +20,12 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/kernloom/kernloom-core/internal/api/authn"
 	"github.com/kernloom/kernloom-core/internal/core/domain"
 	"github.com/kernloom/kernloom-core/internal/kliq/actionstate"
 	kliqbundle "github.com/kernloom/kernloom-core/internal/kliq/bundle"
 	kliqruntime "github.com/kernloom/kernloom-core/internal/kliq/runtime"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 )
 
 const (
@@ -48,23 +48,25 @@ func (f *adapterFlag) Set(value string) error {
 }
 
 type runOptions struct {
-	Mode               string
-	StatePath          string
-	TrustBundlePath    string
-	DevAllowPrivateKey bool
-	ForgeURL           string
-	BundleSource       string
-	StatusListen       string
-	PollInterval       time.Duration
-	HeartbeatInterval  time.Duration
-	StatusInterval     time.Duration
-	DecisionInterval   time.Duration
-	ReconcileInterval  time.Duration
-	AuditFlushInterval time.Duration
-	DecisionSource     string
-	Once               bool
-	Adapters           []string
-	HTTPClient         *http.Client
+	Mode                      string
+	StatePath                 string
+	TrustBundlePath           string
+	DevAllowPrivateKey        bool
+	ForgeURL                  string
+	BundleSource              string
+	StatusListen              string
+	PollInterval              time.Duration
+	HeartbeatInterval         time.Duration
+	StatusInterval            time.Duration
+	DecisionInterval          time.Duration
+	ReconcileInterval         time.Duration
+	AuditFlushInterval        time.Duration
+	DecisionSource            string
+	Once                      bool
+	Adapters                  []string
+	HTTPClient                *http.Client
+	DevInsecureForgeTransport bool
+	AdapterTransport          adapterTransportOptions
 }
 
 type runDaemon struct {
@@ -100,9 +102,15 @@ func run(args []string) {
 	fs.DurationVar(&opts.DecisionInterval, "decision-interval", 5*time.Second, "runtime decision source polling interval")
 	fs.DurationVar(&opts.ReconcileInterval, "reconcile-interval", 30*time.Second, "runtime action lease reconciliation interval")
 	fs.DurationVar(&opts.AuditFlushInterval, "audit-flush-interval", time.Minute, "audit spool flush interval")
-	fs.StringVar(&opts.DecisionSource, "decision-source", "", "optional local runtime decision source file; JSON object or array of execute-action requests")
+	fs.StringVar(&opts.DecisionSource, "decision-source", "", "optional local runtime decision source file; JSON object or array of local runtime events or debug execute-action requests")
 	fs.BoolVar(&opts.Once, "once", false, "run one daemon cycle and exit; intended for smoke tests")
 	fs.Var(&adapters, "adapter", "dev/bootstrap adapter runtime endpoint as adapter_id=host:port; repeatable; managed production should prefer adapter_assignment artifacts")
+	fs.BoolVar(&opts.DevInsecureForgeTransport, "dev-insecure-forge-transport", false, "allow plaintext http Forge transport; dev/smoke only")
+	fs.BoolVar(&opts.AdapterTransport.DevInsecureAdapterTransport, "dev-insecure-adapter-transport", false, "allow plaintext adapter gRPC transport; dev/smoke only")
+	fs.StringVar(&opts.AdapterTransport.CAPath, "adapter-ca", "", "adapter mTLS CA bundle")
+	fs.StringVar(&opts.AdapterTransport.ClientCertPath, "adapter-client-cert", "", "adapter mTLS client certificate")
+	fs.StringVar(&opts.AdapterTransport.ClientKeyPath, "adapter-client-key", "", "adapter mTLS client private key")
+	fs.StringVar(&opts.AdapterTransport.ServerName, "adapter-server-name", "", "expected adapter TLS server name")
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
@@ -130,7 +138,7 @@ func runKLIQ(ctx context.Context, opts runOptions) error {
 	if err != nil {
 		return err
 	}
-	registry, closeAdapters, err := adapterRegistryFromFlags(opts.Adapters)
+	registry, closeAdapters, err := adapterRegistryFromFlags(opts.Adapters, opts.AdapterTransport)
 	if err != nil {
 		return err
 	}
@@ -168,6 +176,9 @@ func runKLIQ(ctx context.Context, opts runOptions) error {
 		}
 		if credential.AssignmentURL == "" {
 			return fmt.Errorf("managed mode requires --forge-url or an enrolled assignment_url")
+		}
+		if err := validateSecureForgeURL(credential.AssignmentURL, opts.DevInsecureForgeTransport); err != nil {
+			return err
 		}
 		daemon.credential = credential
 	}
@@ -239,6 +250,13 @@ func (d *runDaemon) loop(ctx context.Context) error {
 		case <-pollTicker.C:
 			if err := d.loadOrPoll(ctx); err != nil {
 				logError("assignment_poll_failed", "mode", d.opts.Mode, "kliq_id", d.credential.KLIQID, "error", err.Error())
+			} else {
+				resetTicker(pollTicker, d.opts.PollInterval)
+				resetTicker(heartbeatTicker, d.opts.HeartbeatInterval)
+				resetTicker(statusTicker, d.opts.StatusInterval)
+				resetTicker(decisionTicker, d.opts.DecisionInterval)
+				resetTicker(reconcileTicker, d.opts.ReconcileInterval)
+				resetTicker(auditTicker, d.opts.AuditFlushInterval)
 			}
 		case <-heartbeatTicker.C:
 			if d.opts.Mode == kliqRunModeManaged {
@@ -306,9 +324,9 @@ func (d *runDaemon) pollManagedAssignment(ctx context.Context) error {
 	logInfo("assignment_downloaded", "kliq_id", d.credential.KLIQID, "assignment_id", state.ActiveAssignmentID, "assignment_version", state.ActiveAssignmentVersion)
 	logInfo("assignment_verified", "kliq_id", d.credential.KLIQID, "assignment_id", state.ActiveAssignmentID, "assignment_version", state.ActiveAssignmentVersion, "source_commit", record.SourceCommit)
 	logInfo("assignment_activated", "kliq_id", d.credential.KLIQID, "assignment_id", state.ActiveAssignmentID, "assignment_version", state.ActiveAssignmentVersion, "bundle_id", record.BundleID, "policy_id", record.PolicyID, "source_commit", record.SourceCommit, "correlation_id", redactID(record.CorrelationID))
-	if err := d.activateManagedAdapterAssignments(ctx); err != nil {
-		d.recordFinding("adapter assignment activation failed: " + err.Error())
-		logError("adapter_assignment_rejected", "kliq_id", d.credential.KLIQID, "assignment_id", state.ActiveAssignmentID, "error", err.Error())
+	if err := d.activateManagedArtifacts(ctx); err != nil {
+		d.recordFinding("managed assignment artifact activation failed: " + err.Error())
+		logError("managed_assignment_artifact_activation_failed", "kliq_id", d.credential.KLIQID, "assignment_id", state.ActiveAssignmentID, "error", err.Error())
 	}
 	return nil
 }
@@ -400,7 +418,14 @@ func (d *runDaemon) sendStatusReport(ctx context.Context) error {
 }
 
 func (d *runDaemon) postManagedJSON(ctx context.Context, path string, value any) error {
+	return d.postManagedJSONResponse(ctx, path, value, nil)
+}
+
+func (d *runDaemon) postManagedJSONResponse(ctx context.Context, path string, value any, response any) error {
 	if err := d.ensureServiceTokenFresh(ctx); err != nil {
+		return err
+	}
+	if err := validateSecureForgeURL(d.credential.AssignmentURL, d.opts.DevInsecureForgeTransport); err != nil {
 		return err
 	}
 	data, err := json.Marshal(value)
@@ -422,6 +447,11 @@ func (d *runDaemon) postManagedJSON(ctx context.Context, path string, value any)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
 		return fmt.Errorf("%s returned %s: %s", path, resp.Status, strings.TrimSpace(string(body)))
+	}
+	if response != nil {
+		if err := json.NewDecoder(resp.Body).Decode(response); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -461,7 +491,14 @@ func (d *runDaemon) flushAuditSpool(ctx context.Context) error {
 		if d.opts.Mode != kliqRunModeManaged {
 			continue
 		}
+		if !auditRetryDue(record, d.now().UTC()) {
+			continue
+		}
 		uploadedAt := d.now().UTC()
+		payloadSHA256 := record.PayloadSHA256
+		if payloadSHA256 == "" {
+			payloadSHA256 = domain.SHA256JSON([]byte(record.Payload))
+		}
 		upload := domain.KLIQAuditUpload{
 			KLIQID:          d.credential.KLIQID,
 			Environment:     d.credential.Environment,
@@ -470,13 +507,20 @@ func (d *runDaemon) flushAuditSpool(ctx context.Context) error {
 			AuditRecordID:   record.ID,
 			RuntimeActionID: record.RuntimeActionID,
 			Payload:         []byte(record.Payload),
-			PayloadSHA256:   domain.SHA256JSON([]byte(record.Payload)),
+			PayloadSHA256:   payloadSHA256,
 			CreatedAt:       record.CreatedAt,
 			UploadedAt:      uploadedAt,
 		}
-		if err := d.postManagedJSON(ctx, "/v1/kliq/audit-events", upload); err != nil {
+		var ack domain.KLIQAuditUploadAck
+		if err := d.postManagedJSONResponse(ctx, "/v1/kliq/audit-events", upload, &ack); err != nil {
 			_ = d.store.MarkAuditFailed(ctx, record.ID, uploadedAt, err.Error())
 			logError("audit_flush_failed", "kliq_id", d.credential.KLIQID, "audit_record_id", record.ID, "runtime_action_id", record.RuntimeActionID, "error", err.Error())
+			continue
+		}
+		if ack.Status != "accepted" || ack.AuditRecordID != record.ID || ack.AckID == "" {
+			message := "forge audit upload acknowledgement invalid"
+			_ = d.store.MarkAuditFailed(ctx, record.ID, uploadedAt, message)
+			logError("audit_flush_failed", "kliq_id", d.credential.KLIQID, "audit_record_id", record.ID, "runtime_action_id", record.RuntimeActionID, "error", message)
 			continue
 		}
 		if err := d.store.MarkAuditUploaded(ctx, record.ID, uploadedAt); err != nil {
@@ -486,6 +530,17 @@ func (d *runDaemon) flushAuditSpool(ctx context.Context) error {
 	}
 	logInfo("kliq_audit_spool_flush_checked", "pending", len(records))
 	return nil
+}
+
+func auditRetryDue(record actionstate.AuditRecord, now time.Time) bool {
+	if record.RetryCount <= 0 || record.LastAttemptAt.IsZero() {
+		return true
+	}
+	backoff := time.Second * time.Duration(1<<min(record.RetryCount-1, 8))
+	if backoff > 5*time.Minute {
+		backoff = 5 * time.Minute
+	}
+	return !now.Before(record.LastAttemptAt.Add(backoff))
 }
 
 func (d *runDaemon) processRuntimeDecisions(ctx context.Context) error {
@@ -537,6 +592,9 @@ func (d *runDaemon) activeTrustBundle() domain.TrustBundle {
 }
 
 func (d *runDaemon) ensureServiceTokenFresh(ctx context.Context) error {
+	if strings.EqualFold(strings.TrimSpace(d.credential.CredentialStatus), "revoked") {
+		return fmt.Errorf("local KLIQ service credential is revoked")
+	}
 	if d.credential.ServiceToken == "" {
 		return fmt.Errorf("managed mode requires local KLIQ service token")
 	}
@@ -545,15 +603,59 @@ func (d *runDaemon) ensureServiceTokenFresh(ctx context.Context) error {
 	}
 	now := d.now().UTC()
 	if !now.Before(d.credential.ServiceTokenExpiresAt.UTC()) {
+		if isKLIQIdentitySignedToken(d.credential.ServiceToken) {
+			return d.refreshLocalIdentityServiceToken(ctx)
+		}
 		return fmt.Errorf("local KLIQ service token is expired")
 	}
 	if d.credential.ServiceTokenExpiresAt.UTC().Sub(now) <= 5*time.Minute {
+		if isKLIQIdentitySignedToken(d.credential.ServiceToken) {
+			return d.refreshLocalIdentityServiceToken(ctx)
+		}
 		return d.refreshServiceToken(ctx)
 	}
 	return nil
 }
 
+func isKLIQIdentitySignedToken(token string) bool {
+	return strings.HasPrefix(token, "kliqsig.")
+}
+
+func (d *runDaemon) refreshLocalIdentityServiceToken(ctx context.Context) error {
+	identity := domain.KLIQIdentity{
+		KLIQID:                  d.credential.KLIQID,
+		NodeID:                  d.credential.NodeID,
+		Environment:             d.credential.Environment,
+		Stage:                   d.credential.Stage,
+		Scope:                   d.credential.Scope,
+		TrustKeyID:              d.credential.TrustKeyID,
+		PublicKeyPEM:            d.credential.PublicKeyPEM,
+		ServiceIdentityProvider: d.credential.ServiceIdentityProvider,
+		SPIFFEID:                d.credential.SPIFFEID,
+		CredentialStatus:        d.credential.CredentialStatus,
+	}
+	token, err := authn.IssueKLIQIdentitySignedToken(identity, d.credential.PrivateKeyPEM, 24*time.Hour, d.now)
+	if err != nil {
+		return err
+	}
+	expiresAt, err := serviceTokenExpiresAt(token)
+	if err != nil {
+		return err
+	}
+	d.credential.ServiceToken = token
+	d.credential.ServiceTokenExpiresAt = expiresAt
+	d.credential.UpdatedAt = d.now().UTC()
+	if err := d.store.SaveKLIQCredential(ctx, d.credential); err != nil {
+		return err
+	}
+	logInfo("local_kliq_identity_service_token_refreshed", "kliq_id", d.credential.KLIQID, "expires_at", expiresAt.Format(time.RFC3339))
+	return nil
+}
+
 func (d *runDaemon) refreshServiceToken(ctx context.Context) error {
+	if err := validateSecureForgeURL(d.credential.AssignmentURL, d.opts.DevInsecureForgeTransport); err != nil {
+		return err
+	}
 	url := strings.TrimRight(d.credential.AssignmentURL, "/") + "/v1/kliq/service-token/refresh"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
 	if err != nil {
@@ -588,6 +690,9 @@ func (d *runDaemon) refreshServiceToken(ctx context.Context) error {
 	}
 	d.credential.ServiceToken = parsed.ServiceToken
 	d.credential.ServiceTokenExpiresAt = expiresAt
+	if strings.TrimSpace(d.credential.CredentialStatus) == "" {
+		d.credential.CredentialStatus = "active"
+	}
 	d.credential.UpdatedAt = d.now().UTC()
 	if err := d.store.SaveKLIQCredential(ctx, d.credential); err != nil {
 		return err
@@ -596,7 +701,10 @@ func (d *runDaemon) refreshServiceToken(ctx context.Context) error {
 	return nil
 }
 
-func (d *runDaemon) activateManagedAdapterAssignments(ctx context.Context) error {
+func (d *runDaemon) activateManagedArtifacts(ctx context.Context) error {
+	if err := d.applyManagedManagementProfile(ctx); err != nil {
+		return err
+	}
 	artifacts, err := d.store.AssignmentArtifacts(ctx, d.credential.KLIQID)
 	if err != nil {
 		return err
@@ -624,7 +732,7 @@ func (d *runDaemon) activateManagedAdapterAssignments(ctx context.Context) error
 	if len(values) == 0 {
 		return nil
 	}
-	registry, closeFn, err := adapterRegistryFromFlags(values)
+	registry, closeFn, err := adapterRegistryFromFlags(values, d.opts.AdapterTransport)
 	if err != nil {
 		return err
 	}
@@ -635,6 +743,67 @@ func (d *runDaemon) activateManagedAdapterAssignments(ctx context.Context) error
 	d.manager.Registry = registry
 	logInfo("adapter_assignment_activated", "kliq_id", d.credential.KLIQID, "adapters", strings.Join(values, ","))
 	return nil
+}
+
+func (d *runDaemon) applyManagedManagementProfile(ctx context.Context) error {
+	record, err := d.store.ActiveArtifact(ctx, d.credential.KLIQID, "management_profile")
+	if errors.Is(err, actionstate.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var profile domain.KLIQManagementProfile
+	if err := json.Unmarshal(record.PayloadJSON, &profile); err != nil {
+		return err
+	}
+	if interval, ok, err := profileDuration(profile.PollInterval, "poll_interval"); err != nil {
+		return err
+	} else if ok {
+		d.opts.PollInterval = interval
+	}
+	if interval, ok, err := profileDuration(profile.HeartbeatInterval, "heartbeat_interval"); err != nil {
+		return err
+	} else if ok {
+		d.opts.HeartbeatInterval = interval
+	}
+	if interval, ok, err := profileDuration(profile.StatusInterval, "status_interval"); err != nil {
+		return err
+	} else if ok {
+		d.opts.StatusInterval = interval
+	}
+	if interval, ok, err := profileDuration(profile.DecisionInterval, "decision_interval"); err != nil {
+		return err
+	} else if ok {
+		d.opts.DecisionInterval = interval
+	}
+	if interval, ok, err := profileDuration(profile.ReconcileInterval, "reconcile_interval"); err != nil {
+		return err
+	} else if ok {
+		d.opts.ReconcileInterval = interval
+	}
+	if interval, ok, err := profileDuration(profile.AuditFlushInterval, "audit_flush_interval"); err != nil {
+		return err
+	} else if ok {
+		d.opts.AuditFlushInterval = interval
+	}
+	logInfo("management_profile_activated", "kliq_id", d.credential.KLIQID, "profile_id", profile.ProfileID, "poll_interval", d.opts.PollInterval.String(), "heartbeat_interval", d.opts.HeartbeatInterval.String(), "status_interval", d.opts.StatusInterval.String())
+	return nil
+}
+
+func profileDuration(value, field string) (time.Duration, bool, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, false, nil
+	}
+	parsed, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, false, fmt.Errorf("invalid management profile %s %q: %w", field, value, err)
+	}
+	if parsed <= 0 {
+		return 0, false, fmt.Errorf("management profile %s must be positive", field)
+	}
+	return parsed, true, nil
 }
 
 func (d *runDaemon) recordFinding(finding string) {
@@ -690,9 +859,34 @@ func newTicker(interval time.Duration) *time.Ticker {
 	return time.NewTicker(interval)
 }
 
+func resetTicker(ticker *time.Ticker, interval time.Duration) {
+	if interval <= 0 {
+		interval = time.Minute
+	}
+	ticker.Reset(interval)
+}
+
 type fileRuntimeDecisionSource struct {
 	requests []kliqruntime.ExecuteRequest
 	index    int
+}
+
+type localRuntimeEvent struct {
+	Kind              string `json:"kind,omitempty"`
+	EventID           string `json:"event_id,omitempty"`
+	EventType         string `json:"event_type,omitempty"`
+	SignalID          string `json:"signal_id,omitempty"`
+	AdapterID         string `json:"adapter_id"`
+	CapabilityID      string `json:"capability_id"`
+	CapabilityGrantID string `json:"capability_grant_id"`
+	Mode              string `json:"mode,omitempty"`
+	ActionType        string `json:"action_type"`
+	TargetScope       string `json:"target_scope,omitempty"`
+	TargetKey         string `json:"target_key"`
+	TTL               string `json:"ttl,omitempty"`
+	Reason            string `json:"reason,omitempty"`
+	AuditID           string `json:"audit_id,omitempty"`
+	CorrelationID     string `json:"correlation_id,omitempty"`
 }
 
 func runtimeDecisionSourceFromFile(path string) (*fileRuntimeDecisionSource, error) {
@@ -708,19 +902,89 @@ func runtimeDecisionSourceFromFile(path string) (*fileRuntimeDecisionSource, err
 	if trimmed == "" {
 		return &fileRuntimeDecisionSource{}, nil
 	}
-	var requests []kliqruntime.ExecuteRequest
+	var raws []json.RawMessage
 	if strings.HasPrefix(trimmed, "[") {
-		if err := json.Unmarshal([]byte(trimmed), &requests); err != nil {
+		if err := json.Unmarshal([]byte(trimmed), &raws); err != nil {
 			return nil, err
 		}
 	} else {
-		var request kliqruntime.ExecuteRequest
-		if err := json.Unmarshal([]byte(trimmed), &request); err != nil {
+		raws = append(raws, json.RawMessage(trimmed))
+	}
+	requests := make([]kliqruntime.ExecuteRequest, 0, len(raws))
+	for _, raw := range raws {
+		request, err := runtimeDecisionRequestFromJSON(raw)
+		if err != nil {
 			return nil, err
 		}
 		requests = append(requests, request)
 	}
 	return &fileRuntimeDecisionSource{requests: requests}, nil
+}
+
+func runtimeDecisionRequestFromJSON(raw json.RawMessage) (kliqruntime.ExecuteRequest, error) {
+	var probe struct {
+		Kind      string `json:"kind"`
+		EventID   string `json:"event_id"`
+		EventType string `json:"event_type"`
+		SignalID  string `json:"signal_id"`
+	}
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return kliqruntime.ExecuteRequest{}, err
+	}
+	if probe.Kind == "LocalRuntimeEvent" || probe.Kind == "RuntimeEvent" || probe.EventID != "" || probe.EventType != "" || probe.SignalID != "" {
+		var event localRuntimeEvent
+		if err := json.Unmarshal(raw, &event); err != nil {
+			return kliqruntime.ExecuteRequest{}, err
+		}
+		return executeRequestFromLocalRuntimeEvent(event, raw), nil
+	}
+	var request kliqruntime.ExecuteRequest
+	if err := json.Unmarshal(raw, &request); err != nil {
+		return kliqruntime.ExecuteRequest{}, err
+	}
+	return request, nil
+}
+
+func executeRequestFromLocalRuntimeEvent(event localRuntimeEvent, raw []byte) kliqruntime.ExecuteRequest {
+	eventID := firstNonEmpty(event.EventID, event.SignalID, redactedHash(string(raw)))
+	decisionID := "runtime_decision." + strings.TrimPrefix(redactedHash(eventID), "sha256:")
+	mode := event.Mode
+	if strings.TrimSpace(mode) == "" {
+		mode = kliqruntime.ActionModeRequired
+	}
+	reason := strings.TrimSpace(event.Reason)
+	if reason == "" {
+		reason = "local runtime event " + eventID
+	}
+	auditID := strings.TrimSpace(event.AuditID)
+	if auditID == "" {
+		auditID = "audit." + strings.TrimPrefix(redactedHash(decisionID), "sha256:")
+	}
+	return kliqruntime.ExecuteRequest{
+		DecisionID:        decisionID,
+		EventType:         event.EventType,
+		EventID:           eventID,
+		AdapterID:         event.AdapterID,
+		CapabilityID:      event.CapabilityID,
+		CapabilityGrantID: event.CapabilityGrantID,
+		Mode:              mode,
+		ActionType:        event.ActionType,
+		TargetScope:       event.TargetScope,
+		TargetKey:         event.TargetKey,
+		TTL:               event.TTL,
+		Reason:            reason,
+		AuditID:           auditID,
+		CorrelationID:     event.CorrelationID,
+	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 func (s *fileRuntimeDecisionSource) NextDecision(_ context.Context) (kliqruntime.ExecuteRequest, bool, error) {
@@ -732,7 +996,7 @@ func (s *fileRuntimeDecisionSource) NextDecision(_ context.Context) (kliqruntime
 	return request, true, nil
 }
 
-func adapterRegistryFromFlags(values []string) (kliqruntime.AdapterRuntimeRegistry, func(), error) {
+func adapterRegistryFromFlags(values []string, transport adapterTransportOptions) (kliqruntime.AdapterRuntimeRegistry, func(), error) {
 	if len(values) == 0 {
 		return nil, func() {}, nil
 	}
@@ -749,7 +1013,12 @@ func adapterRegistryFromFlags(values []string) (kliqruntime.AdapterRuntimeRegist
 			closeFn()
 			return nil, func() {}, fmt.Errorf("adapter must be adapter_id=host:port")
 		}
-		conn, err := grpc.NewClient(strings.TrimSpace(addr), grpc.WithTransportCredentials(insecure.NewCredentials()))
+		dialOptions, err := adapterDialOptions(transport)
+		if err != nil {
+			closeFn()
+			return nil, func() {}, err
+		}
+		conn, err := grpc.NewClient(strings.TrimSpace(addr), dialOptions...)
 		if err != nil {
 			closeFn()
 			return nil, func() {}, err

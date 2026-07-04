@@ -217,7 +217,7 @@ func expectedArtifactKind(artifactType string) string {
 	case "adapter_assignment":
 		return "AdapterAssignment"
 	case "trust_bundle":
-		return "TrustBundle"
+		return ""
 	case "management_profile":
 		return ""
 	case "fallback_profile":
@@ -236,6 +236,9 @@ func (s *ManagedAssignmentSource) validateTrustBundle(assignment domain.KLIQAssi
 	}
 	if s.TrustBundle.KeyID != result.KeyID {
 		return fmt.Errorf("assignment signing key %q does not match trust bundle key %q", result.KeyID, s.TrustBundle.KeyID)
+	}
+	if s.TrustBundle.Purpose != "assignment_verification" {
+		return fmt.Errorf("trust bundle %q has purpose %q, expected assignment_verification", s.TrustBundle.KeyID, s.TrustBundle.Purpose)
 	}
 	if s.TrustBundle.Status != "active" {
 		return fmt.Errorf("trust bundle %q is %q", s.TrustBundle.KeyID, s.TrustBundle.Status)
