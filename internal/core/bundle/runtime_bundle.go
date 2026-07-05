@@ -3,7 +3,10 @@
 
 package bundle
 
-import "github.com/kernloom/kernloom-core/internal/core/artifact"
+import (
+	"github.com/kernloom/kernloom-core/internal/core/artifact"
+	corerisk "github.com/kernloom/kernloom-core/internal/core/risk"
+)
 
 type RuntimeBundle struct {
 	Kind     string            `json:"kind"`
@@ -13,14 +16,16 @@ type RuntimeBundle struct {
 }
 
 type RuntimeBundleSpec struct {
-	PolicyID         string            `json:"policy_id"`
-	RuntimeAllowed   bool              `json:"runtime_allowed"`
-	RuntimeActions   []RuntimeAction   `json:"runtime_actions,omitempty"`
-	CapabilityGrants []CapabilityGrant `json:"capability_grants,omitempty"`
-	MaxTTL           string            `json:"max_ttl"`
-	MaxTTLSource     string            `json:"max_ttl_source"`
-	MaxScope         string            `json:"max_scope"`
-	MaxScopeSource   string            `json:"max_scope_source"`
+	PolicyID         string                        `json:"policy_id"`
+	RuntimeAllowed   bool                          `json:"runtime_allowed"`
+	RuntimeActions   []RuntimeAction               `json:"runtime_actions,omitempty"`
+	CapabilityGrants []CapabilityGrant             `json:"capability_grants,omitempty"`
+	RiskRecipe       string                        `json:"risk_recipe,omitempty"`
+	RiskBehavior     []corerisk.PolicyRiskBehavior `json:"risk_behavior,omitempty"`
+	MaxTTL           string                        `json:"max_ttl"`
+	MaxTTLSource     string                        `json:"max_ttl_source"`
+	MaxScope         string                        `json:"max_scope"`
+	MaxScopeSource   string                        `json:"max_scope_source"`
 }
 
 type RuntimeAction struct {
@@ -29,15 +34,21 @@ type RuntimeAction struct {
 }
 
 type CapabilityGrant struct {
-	ID                  string   `json:"capability_grant_id"`
-	AdapterID           string   `json:"adapter_id"`
-	CapabilityID        string   `json:"capability_id"`
-	ActionType          string   `json:"action_type"`
-	AllowedTargetScopes []string `json:"allowed_target_scopes"`
-	MaxTTL              string   `json:"max_ttl"`
-	Stage               string   `json:"stage,omitempty"`
-	Environment         string   `json:"environment,omitempty"`
-	Owner               string   `json:"owner,omitempty"`
-	ApprovalRef         string   `json:"approval_ref,omitempty"`
-	ExpiresAt           string   `json:"expires_at,omitempty"`
+	ID                  string               `json:"capability_grant_id"`
+	AdapterID           string               `json:"adapter_id"`
+	CapabilityID        string               `json:"capability_id"`
+	ActionType          string               `json:"action_type"`
+	AllowedTargetScopes []string             `json:"allowed_target_scopes"`
+	MaxTTL              string               `json:"max_ttl"`
+	Stage               string               `json:"stage,omitempty"`
+	Environment         string               `json:"environment,omitempty"`
+	Owner               string               `json:"owner,omitempty"`
+	ApprovalRef         string               `json:"approval_ref,omitempty"`
+	ExpiresAt           string               `json:"expires_at,omitempty"`
+	RateLimit           *RateLimitParameters `json:"rate_limit,omitempty"`
+}
+
+type RateLimitParameters struct {
+	RatePPS uint64 `json:"rate_pps"`
+	Burst   uint64 `json:"burst"`
 }

@@ -146,6 +146,10 @@ func (s Server) approvePolicyBuildManifest(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if samePrincipal(manifest.Metadata.CreatedBy, principal.Subject) {
+		writeError(w, http.StatusForbidden, "build_manifest_self_approval_rejected")
+		return
+	}
 	now := time.Now().UTC()
 	authorityID := strings.TrimSpace(req.AuthorityID)
 	if authorityID == "" {
@@ -228,6 +232,9 @@ func validateBuildManifestApprovalReadiness(manifest compiler.PolicyBuildManifes
 	if strings.TrimSpace(manifest.Metadata.ID) == "" {
 		return fmt.Errorf("build_manifest_missing_id")
 	}
+	if strings.TrimSpace(manifest.Metadata.CreatedBy) == "" {
+		return fmt.Errorf("build_manifest_missing_created_by")
+	}
 	if strings.TrimSpace(manifest.Spec.PolicyRepo.Commit) == "" {
 		return fmt.Errorf("build_manifest_missing_source_commit")
 	}
@@ -252,6 +259,10 @@ func validateBuildManifestApprovalReadiness(manifest compiler.PolicyBuildManifes
 		}
 	}
 	return nil
+}
+
+func samePrincipal(left, right string) bool {
+	return strings.EqualFold(strings.TrimSpace(left), strings.TrimSpace(right))
 }
 
 func (s Server) createEnrollmentToken(w http.ResponseWriter, r *http.Request, principal authn.Principal) {
@@ -644,11 +655,17 @@ func (s Server) verifyApprovedBuildManifestEnvelope(r *http.Request, payload []b
 }
 
 func validateApprovedBuildAuthority(manifest compiler.PolicyBuildManifest, registration domain.KLIQRegistration) error {
+	if strings.TrimSpace(manifest.Metadata.CreatedBy) == "" {
+		return fmt.Errorf("approved_build_missing_created_by")
+	}
 	if strings.TrimSpace(manifest.Approval.ApprovedBy) == "" ||
 		manifest.Approval.ApprovedAt.IsZero() ||
 		strings.TrimSpace(manifest.Approval.AuthorityID) == "" ||
 		strings.TrimSpace(manifest.Approval.AuthorityKind) == "" {
 		return fmt.Errorf("approved_build_missing_approval_authority")
+	}
+	if samePrincipal(manifest.Metadata.CreatedBy, manifest.Approval.ApprovedBy) {
+		return fmt.Errorf("approved_build_self_approval_rejected")
 	}
 	if strings.TrimSpace(manifest.Approval.Environment) == "" ||
 		strings.TrimSpace(manifest.Approval.Stage) == "" ||

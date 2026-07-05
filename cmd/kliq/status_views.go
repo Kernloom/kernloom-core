@@ -107,6 +107,8 @@ type auditRecordView struct {
 	RuntimeActionID string `json:"runtime_action_id"`
 	Status          string `json:"status"`
 	PayloadSHA256   string `json:"payload_sha256,omitempty"`
+	PreviousHash    string `json:"previous_hash,omitempty"`
+	RecordHash      string `json:"record_hash,omitempty"`
 	CreatedAt       string `json:"created_at"`
 }
 
@@ -346,6 +348,8 @@ func auditRecordViews(records []actionstate.AuditRecord) []auditRecordView {
 			RuntimeActionID: record.RuntimeActionID,
 			Status:          record.Status,
 			PayloadSHA256:   record.PayloadSHA256,
+			PreviousHash:    record.PreviousHash,
+			RecordHash:      record.RecordHash,
 			CreatedAt:       formatStatusTime(record.CreatedAt),
 		})
 	}

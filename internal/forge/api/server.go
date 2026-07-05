@@ -71,6 +71,15 @@ func (s Server) requireAuth(next func(http.ResponseWriter, *http.Request, authn.
 			writeError(w, http.StatusInternalServerError, "authenticator_not_configured")
 			return
 		}
+		if requestVerifier, ok := s.Authenticator.(authn.RequestVerifier); ok {
+			principal, err := requestVerifier.VerifyRequest(r.Context(), r)
+			if err == nil {
+				ctx := authn.WithPrincipal(r.Context(), principal)
+				ctx = management.WithAuditActor(ctx, principal.Subject)
+				next(w, r.WithContext(ctx), principal)
+				return
+			}
+		}
 		token, err := authn.BearerToken(r.Header.Get("Authorization"))
 		if err != nil {
 			writeError(w, http.StatusUnauthorized, "missing_bearer_token")

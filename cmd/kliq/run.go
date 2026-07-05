@@ -111,6 +111,7 @@ func run(args []string) {
 	fs.StringVar(&opts.AdapterTransport.ClientCertPath, "adapter-client-cert", "", "adapter mTLS client certificate")
 	fs.StringVar(&opts.AdapterTransport.ClientKeyPath, "adapter-client-key", "", "adapter mTLS client private key")
 	fs.StringVar(&opts.AdapterTransport.ServerName, "adapter-server-name", "", "expected adapter TLS server name")
+	fs.StringVar(&opts.AdapterTransport.ServerCertificateSHA256, "adapter-server-cert-sha256", "", "expected adapter leaf certificate SHA-256 pin")
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
@@ -709,7 +710,7 @@ func (d *runDaemon) activateManagedArtifacts(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	values := make([]string, 0)
+	assignments := make([]domain.AdapterAssignment, 0)
 	for _, artifact := range artifacts {
 		if artifact.ArtifactType != "adapter_assignment" {
 			continue
@@ -727,12 +728,12 @@ func (d *runDaemon) activateManagedArtifacts(ctx context.Context) error {
 		if strings.TrimSpace(assignment.AdapterID) == "" || strings.TrimSpace(assignment.Endpoint) == "" {
 			return fmt.Errorf("adapter assignment %q requires adapter_id and endpoint", artifact.ArtifactID)
 		}
-		values = append(values, assignment.AdapterID+"="+assignment.Endpoint)
+		assignments = append(assignments, assignment)
 	}
-	if len(values) == 0 {
+	if len(assignments) == 0 {
 		return nil
 	}
-	registry, closeFn, err := adapterRegistryFromFlags(values, d.opts.AdapterTransport)
+	registry, closeFn, err := adapterRegistryFromAssignments(assignments, d.opts.AdapterTransport)
 	if err != nil {
 		return err
 	}
@@ -741,7 +742,7 @@ func (d *runDaemon) activateManagedArtifacts(ctx context.Context) error {
 	}
 	d.closeManagedAdapters = closeFn
 	d.manager.Registry = registry
-	logInfo("adapter_assignment_activated", "kliq_id", d.credential.KLIQID, "adapters", strings.Join(values, ","))
+	logInfo("adapter_assignment_activated", "kliq_id", d.credential.KLIQID, "adapters", strings.Join(adapterAssignmentLogValues(assignments), ","))
 	return nil
 }
 
@@ -876,6 +877,7 @@ type localRuntimeEvent struct {
 	EventID           string `json:"event_id,omitempty"`
 	EventType         string `json:"event_type,omitempty"`
 	SignalID          string `json:"signal_id,omitempty"`
+	RiskType          string `json:"risk_type,omitempty"`
 	AdapterID         string `json:"adapter_id"`
 	CapabilityID      string `json:"capability_id"`
 	CapabilityGrantID string `json:"capability_grant_id"`
@@ -964,6 +966,7 @@ func executeRequestFromLocalRuntimeEvent(event localRuntimeEvent, raw []byte) kl
 		DecisionID:        decisionID,
 		EventType:         event.EventType,
 		EventID:           eventID,
+		RiskType:          event.RiskType,
 		AdapterID:         event.AdapterID,
 		CapabilityID:      event.CapabilityID,
 		CapabilityGrantID: event.CapabilityGrantID,
@@ -1031,6 +1034,60 @@ func adapterRegistryFromFlags(values []string, transport adapterTransportOptions
 	}
 	registry := kliqruntime.NewStaticAdapterRuntimeRegistry(entries...)
 	return registry, closeFn, nil
+}
+
+func adapterRegistryFromAssignments(assignments []domain.AdapterAssignment, transport adapterTransportOptions) (kliqruntime.AdapterRuntimeRegistry, func(), error) {
+	entries := make([]kliqruntime.StaticAdapterRuntimeEntry, 0, len(assignments))
+	var conns []*grpc.ClientConn
+	closeFn := func() {
+		for _, conn := range conns {
+			_ = conn.Close()
+		}
+	}
+	for _, assignment := range assignments {
+		adapterID := strings.TrimSpace(assignment.AdapterID)
+		endpoint := strings.TrimSpace(assignment.Endpoint)
+		if adapterID == "" || endpoint == "" {
+			closeFn()
+			return nil, func() {}, fmt.Errorf("adapter assignment requires adapter_id and endpoint")
+		}
+		adapterTransport := adapterTransportForAssignment(transport, assignment)
+		dialOptions, err := adapterDialOptions(adapterTransport)
+		if err != nil {
+			closeFn()
+			return nil, func() {}, err
+		}
+		conn, err := grpc.NewClient(endpoint, dialOptions...)
+		if err != nil {
+			closeFn()
+			return nil, func() {}, err
+		}
+		conns = append(conns, conn)
+		entries = append(entries, kliqruntime.StaticAdapterRuntimeEntry{
+			AdapterID: adapterID,
+			Executor:  kliqruntime.NewAdapterRuntimeExecutor(conn),
+		})
+	}
+	return kliqruntime.NewStaticAdapterRuntimeRegistry(entries...), closeFn, nil
+}
+
+func adapterTransportForAssignment(transport adapterTransportOptions, assignment domain.AdapterAssignment) adapterTransportOptions {
+	adapterTransport := transport
+	if serverName := strings.TrimSpace(assignment.TLSServerName); serverName != "" {
+		adapterTransport.ServerName = serverName
+	}
+	if certPin := strings.TrimSpace(assignment.ServerCertificateSHA256); certPin != "" {
+		adapterTransport.ServerCertificateSHA256 = certPin
+	}
+	return adapterTransport
+}
+
+func adapterAssignmentLogValues(assignments []domain.AdapterAssignment) []string {
+	values := make([]string, 0, len(assignments))
+	for _, assignment := range assignments {
+		values = append(values, strings.TrimSpace(assignment.AdapterID)+"="+strings.TrimSpace(assignment.Endpoint))
+	}
+	return values
 }
 
 func resolveStandaloneBundlePath(path string) (string, error) {

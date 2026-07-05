@@ -23,6 +23,7 @@ import (
 	"github.com/kernloom/kernloom-core/internal/core/expression"
 	"github.com/kernloom/kernloom-core/internal/core/intent"
 	"github.com/kernloom/kernloom-core/internal/core/registry"
+	corerisk "github.com/kernloom/kernloom-core/internal/core/risk"
 	"github.com/kernloom/kernloom-core/internal/core/signing"
 	"github.com/kernloom/kernloom-core/internal/core/version"
 	"github.com/kernloom/kernloom-core/internal/storage/artifactstore"
@@ -300,7 +301,7 @@ func compileOne(ctx context.Context, card *intent.Card, catalog *registry.Catalo
 
 	manifest := PolicyBuildManifest{
 		Kind:     "PolicyBuildManifest",
-		Metadata: ManifestMetadata{ID: "build." + card.ID, CorrelationID: correlationID},
+		Metadata: ManifestMetadata{ID: "build." + card.ID, CorrelationID: correlationID, CreatedBy: buildCreatedBy(opts)},
 		Approval: ManifestApproval{
 			Status: "pending_review",
 		},
@@ -558,6 +559,14 @@ func runtimeBundleArtifact(card *intent.Card, resolved ResolvedPolicy, metadata 
 			grants = append(grants, grant)
 		}
 	}
+	riskBehavior := make([]corerisk.PolicyRiskBehavior, 0, len(resolved.Spec.RiskBehavior))
+	for _, behavior := range resolved.Spec.RiskBehavior {
+		riskBehavior = append(riskBehavior, corerisk.PolicyRiskBehavior{
+			RiskType: behavior.RiskType.CanonicalID,
+			Tier:     behavior.Tier.CanonicalID,
+			Effect:   behavior.Effect.CanonicalID,
+		})
+	}
 	return bundle.RuntimeBundle{
 		Kind:     "RuntimeBundle",
 		Metadata: metadata,
@@ -566,6 +575,8 @@ func runtimeBundleArtifact(card *intent.Card, resolved ResolvedPolicy, metadata 
 			RuntimeAllowed:   resolved.Spec.Runtime.Allowed,
 			RuntimeActions:   actions,
 			CapabilityGrants: grants,
+			RiskRecipe:       resolved.Spec.RiskRecipe,
+			RiskBehavior:     riskBehavior,
 			MaxTTL:           resolved.Spec.Runtime.MaxTTL,
 			MaxTTLSource:     resolved.Spec.Runtime.MaxTTLSource,
 			MaxScope:         resolved.Spec.Runtime.MaxScope.Label,
@@ -728,6 +739,22 @@ func workspaceRootCandidates(opts Options) []string {
 	add("..")
 	add(".")
 	return roots
+}
+
+func buildCreatedBy(opts Options) string {
+	if value := strings.TrimSpace(opts.BuildCreatedBy); value != "" {
+		return value
+	}
+	if value := strings.TrimSpace(os.Getenv("KERNLOOM_BUILD_CREATED_BY")); value != "" {
+		return value
+	}
+	if value := strings.TrimSpace(os.Getenv("USER")); value != "" {
+		return value
+	}
+	if value := strings.TrimSpace(os.Getenv("USERNAME")); value != "" {
+		return value
+	}
+	return "local-compiler"
 }
 
 func intentFiles(opts Options) ([]string, error) {

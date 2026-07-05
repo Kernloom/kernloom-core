@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -36,6 +37,11 @@ type KLIQIdentityStore interface {
 }
 
 type KLIQIdentityTokenVerifier struct {
+	Store KLIQIdentityStore
+	Now   func() time.Time
+}
+
+type KLIQMTLSSPIFFEVerifier struct {
 	Store KLIQIdentityStore
 	Now   func() time.Time
 }
@@ -259,6 +265,76 @@ func (v KLIQIdentityTokenVerifier) Verify(ctx context.Context, token string) (Pr
 			"identity_material_sha256":  claims.IdentityMaterialSHA256,
 		},
 	}, nil
+}
+
+func (v KLIQMTLSSPIFFEVerifier) Verify(_ context.Context, token string) (Principal, error) {
+	return Principal{}, ErrUnauthenticated
+}
+
+func (v KLIQMTLSSPIFFEVerifier) VerifyRequest(ctx context.Context, r *http.Request) (Principal, error) {
+	if v.Store == nil || r == nil || r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
+		return Principal{}, ErrUnauthenticated
+	}
+	cert := r.TLS.PeerCertificates[0]
+	spiffeID := ""
+	for _, uri := range cert.URIs {
+		if uri != nil && uri.Scheme == "spiffe" {
+			spiffeID = uri.String()
+			break
+		}
+	}
+	if spiffeID == "" {
+		return Principal{}, ErrUnauthenticated
+	}
+	kliqID := kliqIDFromSPIFFEID(spiffeID)
+	if kliqID == "" {
+		return Principal{}, fmt.Errorf("spiffe id does not contain kliq id")
+	}
+	identity, err := v.Store.Identity(ctx, kliqID)
+	if err != nil {
+		return Principal{}, ErrUnauthenticated
+	}
+	if identity.Status == "revoked" || identity.CredentialStatus == "revoked" || !identity.RevokedAt.IsZero() {
+		return Principal{}, ErrUnauthenticated
+	}
+	now := time.Now
+	if v.Now != nil {
+		now = v.Now
+	}
+	if !identity.CredentialExpiresAt.IsZero() && !now().UTC().Before(identity.CredentialExpiresAt.UTC()) {
+		return Principal{}, fmt.Errorf("kliq mTLS identity credential expired")
+	}
+	if identity.SPIFFEID != "" && identity.SPIFFEID != spiffeID {
+		return Principal{}, fmt.Errorf("spiffe id does not match registered identity")
+	}
+	return Principal{
+		Subject: "kliq:" + identity.KLIQID,
+		Roles:   []string{KLIQServiceRole},
+		Scope: Scope{
+			Environment: identity.Environment,
+			Stage:       identity.Stage,
+		},
+		Claims: map[string]any{
+			"provider":                  "kliq-mtls-spiffe",
+			"kliq_id":                   identity.KLIQID,
+			"kliq_scope":                identity.Scope,
+			"environment":               identity.Environment,
+			"stage":                     identity.Stage,
+			"service_identity_provider": ServiceIdentityProviderSPIFFEReady,
+			"spiffe_id":                 spiffeID,
+			"identity_material_sha256":  IdentityMaterialSHA256(identity),
+		},
+	}, nil
+}
+
+func kliqIDFromSPIFFEID(spiffeID string) string {
+	parts := strings.Split(strings.TrimSpace(spiffeID), "/")
+	for i := 0; i < len(parts)-1; i++ {
+		if parts[i] == "kliq" {
+			return parts[i+1]
+		}
+	}
+	return ""
 }
 
 func serviceTokenSignature(secret []byte, encodedPayload string) string {

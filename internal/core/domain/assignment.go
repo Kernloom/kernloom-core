@@ -118,13 +118,15 @@ type KLIQAssignedArtifact struct {
 }
 
 type AdapterAssignment struct {
-	Kind                string    `json:"kind"`
-	AdapterID           string    `json:"adapter_id"`
-	Endpoint            string    `json:"endpoint"`
-	AllowedCapabilities []string  `json:"allowed_capabilities,omitempty"`
-	GrantRefs           []string  `json:"grant_refs,omitempty"`
-	Scope               string    `json:"scope,omitempty"`
-	CreatedAt           time.Time `json:"created_at,omitempty"`
+	Kind                    string    `json:"kind"`
+	AdapterID               string    `json:"adapter_id"`
+	Endpoint                string    `json:"endpoint"`
+	TLSServerName           string    `json:"tls_server_name,omitempty"`
+	ServerCertificateSHA256 string    `json:"server_certificate_sha256,omitempty"`
+	AllowedCapabilities     []string  `json:"allowed_capabilities,omitempty"`
+	GrantRefs               []string  `json:"grant_refs,omitempty"`
+	Scope                   string    `json:"scope,omitempty"`
+	CreatedAt               time.Time `json:"created_at,omitempty"`
 }
 
 type AssignmentManifest struct {

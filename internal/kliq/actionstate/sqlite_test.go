@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/kernloom/kernloom-core/internal/core/domain"
+	corerisk "github.com/kernloom/kernloom-core/internal/core/risk"
+	"github.com/kernloom/kernloom-core/internal/kliq/baseline"
 )
 
 func TestOpenSQLiteCreatesStateFileWithPrivatePermissions(t *testing.T) {
@@ -216,5 +218,80 @@ func TestSQLiteAuditSpoolDeduplicatesSamePayloadHash(t *testing.T) {
 	record.Payload = `{"status":"expired"}`
 	if err := store.AppendAudit(ctx, record); err == nil {
 		t.Fatal("expected duplicate audit id with different payload hash to be rejected")
+	}
+}
+
+func TestSQLiteAuditSpoolBuildsHashChain(t *testing.T) {
+	ctx := context.Background()
+	store, err := OpenSQLite(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Now().UTC()
+	first := AuditRecord{ID: "audit_spool.1", RuntimeActionID: "runtime_action.1", Status: "pending_upload", Payload: `{"n":1}`, CreatedAt: now}
+	second := AuditRecord{ID: "audit_spool.2", RuntimeActionID: "runtime_action.2", Status: "pending_upload", Payload: `{"n":2}`, CreatedAt: now.Add(time.Second)}
+	if err := store.AppendAudit(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AppendAudit(ctx, second); err != nil {
+		t.Fatal(err)
+	}
+	records, err := store.PendingAudits(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 2 {
+		t.Fatalf("expected two pending records, got %#v", records)
+	}
+	if records[0].RecordHash == "" || records[1].PreviousHash != records[0].RecordHash || records[1].RecordHash == "" {
+		t.Fatalf("expected linked audit hash chain, got %#v", records)
+	}
+}
+
+func TestSQLiteBaselineAndRiskCacheUnknownOnStale(t *testing.T) {
+	ctx := context.Background()
+	store, err := OpenSQLite(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Now().UTC()
+	version := baseline.VersionRef{VersionID: "baseline_version.test", View: baseline.ViewEntity, Entity: "opaque", CreatedAt: now, PromotedAt: now}
+	stats := baseline.Stats{VersionID: version.VersionID, Key: baseline.Key{View: version.View, Entity: version.Entity}, Metric: "metric", Center: 10, Spread: 1, SampleCount: 5, FrozenAt: now}
+	if err := store.SaveBaselineVersion(ctx, version, []baseline.Stats{stats}, true); err != nil {
+		t.Fatal(err)
+	}
+	active, ok, err := store.ActiveBaselineVersion(ctx, baseline.ViewEntity, "opaque")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || active.VersionID != version.VersionID {
+		t.Fatalf("expected active baseline version, got %#v ok=%t", active, ok)
+	}
+	if err := store.SaveRiskContext(ctx, RiskCacheKey{RiskType: "runtime_anomaly", Scope: corerisk.ScopeLocal}, corerisk.RiskContext{
+		RiskType:    "runtime_anomaly",
+		Tier:        corerisk.TierHigh,
+		Confidence:  0.9,
+		Source:      "test",
+		Scope:       corerisk.ScopeLocal,
+		EvaluatedAt: now,
+		ValidUntil:  now.Add(time.Second),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := store.RiskContext(ctx, RiskCacheKey{RiskType: "runtime_anomaly", Scope: corerisk.ScopeLocal}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fresh.Tier != corerisk.TierHigh {
+		t.Fatalf("expected fresh high risk, got %#v", fresh)
+	}
+	stale, err := store.RiskContext(ctx, RiskCacheKey{RiskType: "runtime_anomaly", Scope: corerisk.ScopeLocal}, now.Add(2*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stale.Tier != corerisk.TierUnknown {
+		t.Fatalf("expected stale risk to become unknown, got %#v", stale)
 	}
 }

@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"crypto/rsa"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/pem"
@@ -65,6 +66,7 @@ func compile(args []string) {
 	fs.StringVar(&opts.SigningKeyPath, "signing-key", "", "dev-local signing key path; defaults to output dir keys/dev-local.ed25519.json")
 	fs.StringVar(&opts.SigningKeyID, "signing-key-id", "dev-local", "key id to place in signed envelopes")
 	fs.StringVar(&opts.CorrelationID, "correlation-id", "", "correlation id to embed in build manifest and artifacts; defaults to a deterministic local-dev id")
+	fs.StringVar(&opts.BuildCreatedBy, "build-created-by", "", "build actor to embed in PolicyBuildManifest metadata; defaults to environment/user for local compiles")
 	fs.DurationVar(&opts.SignatureTTL, "signature-ttl", 24*time.Hour, "signed artifact validity duration")
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -121,7 +123,11 @@ func migrate(args []string) {
 
 func api(args []string) {
 	fs := flag.NewFlagSet("forge api", flag.ExitOnError)
-	addr := fs.String("addr", ":8080", "HTTP listen address")
+	addr := fs.String("addr", ":8080", "API listen address")
+	tlsCert := fs.String("tls-cert", "", "TLS server certificate path for Forge API")
+	tlsKey := fs.String("tls-key", "", "TLS server private key path for Forge API")
+	clientCA := fs.String("client-ca", "", "client CA bundle path; when set, Forge API requires verified client certificates")
+	devInsecureHTTP := fs.Bool("dev-insecure-http", false, "allow plaintext HTTP listener; dev/smoke-test only")
 	queueKind := fs.String("queue", "redis", "job queue backend: redis or memory")
 	redisAddr := fs.String("redis-addr", "127.0.0.1:6379", "Redis address")
 	enableDevTokens := fs.Bool("dev-tokens", false, "enable local dev token provider")
@@ -130,6 +136,14 @@ func api(args []string) {
 	oidcHMACSecret := fs.String("oidc-hmac-secret", "", "HS256 secret for local OIDC/OAuth2 JWT verification")
 	oidcRSAPublicKey := fs.String("oidc-rsa-public-key", "", "PEM-encoded RSA public key for RS256 OIDC/OAuth2 JWT verification")
 	managementSigningKey := fs.String("management-signing-key", "./var/kernloom/forge/management.ed25519.json", "dev-local signing key for KLIQ assignments")
+	managementSignerURL := fs.String("management-signer-url", "", "remote management signer URL; production path keeps private signing key out of Forge API")
+	managementSignerKeyID := fs.String("management-signer-key-id", "forge-management", "expected management signer key_id for trust bundle validation")
+	managementSignerCA := fs.String("management-signer-ca", "", "CA bundle for remote management signer HTTPS")
+	managementSignerClientCert := fs.String("management-signer-client-cert", "", "client certificate for remote management signer mTLS")
+	managementSignerClientKey := fs.String("management-signer-client-key", "", "client private key for remote management signer mTLS")
+	managementSignerServerName := fs.String("management-signer-server-name", "", "expected TLS server name for remote management signer")
+	managementSignerCertPin := fs.String("management-signer-cert-sha256", "", "expected remote management signer leaf certificate SHA-256 pin")
+	devInsecureManagementSigner := fs.Bool("dev-insecure-management-signer-transport", false, "allow plaintext HTTP remote management signer transport; dev/smoke-test only")
 	managementStoreKind := fs.String("management-store", "postgres", "KLIQ management store backend: postgres or memory")
 	managementPostgresDSN := fs.String("management-postgres-dsn", "", "Postgres DSN for KLIQ management store")
 	devManagement := fs.Bool("dev-management", false, "enable explicit dev-only in-memory management store and manual assignment API")
@@ -163,27 +177,59 @@ func api(args []string) {
 		fmt.Fprintln(os.Stderr, "forge api requires at least one auth provider")
 		os.Exit(2)
 	}
-	managementSigner, err := signing.LoadOrCreateDevLocalSigner(*managementSigningKey, "forge-management-dev-local")
-	if err != nil {
-		logger.Error("forge_management_signer_failed", "error", err.Error())
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(2)
-	}
 	managementBackend, err := managementStore(*managementStoreKind, *managementPostgresDSN, *devManagement)
 	if err != nil {
 		logger.Error("forge_management_store_failed", "error", err.Error())
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
-	if err := validateOrSeedManagementTrustBundle(managementBackend, managementSigner, *devSeedManagementTrust); err != nil {
-		logger.Error("forge_management_trust_bundle_failed", "error", err.Error())
-		fmt.Fprintln(os.Stderr, err)
+	var managementSigner signing.Signer
+	if strings.TrimSpace(*managementSignerURL) != "" {
+		managementSigner = signing.RemoteSigner{
+			URL:                  strings.TrimSpace(*managementSignerURL),
+			AllowDevInsecureHTTP: *devInsecureManagementSigner,
+			CAPath:               strings.TrimSpace(*managementSignerCA),
+			ClientCertPath:       strings.TrimSpace(*managementSignerClientCert),
+			ClientKeyPath:        strings.TrimSpace(*managementSignerClientKey),
+			ServerName:           strings.TrimSpace(*managementSignerServerName),
+			ServerCertificatePin: strings.TrimSpace(*managementSignerCertPin),
+		}
+		if *devInsecureManagementSigner {
+			logger.Warn("forge_management_signer_plaintext_enabled", "message", "remote management signer plaintext transport is dev-only")
+		}
+		if err := validateProvisionedManagementTrustBundle(managementBackend, *managementSignerKeyID); err != nil {
+			logger.Error("forge_management_trust_bundle_failed", "error", err.Error())
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
+	} else {
+		devSigner, err := signing.LoadOrCreateDevLocalSigner(*managementSigningKey, "forge-management-dev-local")
+		if err != nil {
+			logger.Error("forge_management_signer_failed", "error", err.Error())
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
+		managementSigner = devSigner
+		if err := validateOrSeedManagementTrustBundle(managementBackend, devSigner, *devSeedManagementTrust); err != nil {
+			logger.Error("forge_management_trust_bundle_failed", "error", err.Error())
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
+	}
+	if managementSigner == nil {
+		logger.Error("forge_management_signer_failed", "error", "signer not configured")
 		os.Exit(2)
 	}
-	if *devSeedManagementTrust {
+	if strings.TrimSpace(*managementSignerURL) == "" && *devSeedManagementTrust {
 		logger.Warn("forge_management_trust_seed_enabled", "message", "management trust bootstrap from local signer is explicit dev-only behavior")
 	}
-	authenticator = append(authenticator, authn.KLIQIdentityTokenVerifier{Store: managementBackend})
+	if strings.TrimSpace(*managementSignerURL) != "" && *devSeedManagementTrust {
+		logger.Warn("forge_management_trust_seed_ignored", "message", "remote signer mode requires pre-provisioned trust bundle")
+	}
+	authenticator = append(authenticator,
+		authn.KLIQIdentityTokenVerifier{Store: managementBackend},
+		authn.KLIQMTLSSPIFFEVerifier{Store: managementBackend},
+	)
 	var kliqService *authn.KLIQServiceTokenIssuer
 	kliqSecret, err := loadKLIQServiceTokenSecret(*kliqServiceTokenSecret, *kliqServiceTokenSecretFile, *devAllowCLIKLIQServiceTokenSecret)
 	if err != nil {
@@ -206,12 +252,67 @@ func api(args []string) {
 		KLIQService:    kliqService,
 		DevManagement:  *devManagement,
 	}
-	logger.Info("forge_api_starting", "addr", *addr, "queue", *queueKind)
-	if err := http.ListenAndServe(*addr, server.Handler()); err != nil {
+	tlsConfig, useTLS, err := forgeAPITLSConfig(*tlsCert, *tlsKey, *clientCA, *devInsecureHTTP)
+	if err != nil {
+		logger.Error("forge_api_tls_config_failed", "error", err.Error())
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	transport := "https"
+	if !useTLS {
+		transport = "dev-plaintext-http"
+		logger.Warn("forge_api_plaintext_http_enabled", "message", "plaintext Forge API transport is dev-only")
+	}
+	logger.Info("forge_api_starting", "addr", *addr, "queue", *queueKind, "transport", transport, "client_ca_configured", strings.TrimSpace(*clientCA) != "")
+	httpServer := &http.Server{
+		Addr:      *addr,
+		Handler:   server.Handler(),
+		TLSConfig: tlsConfig,
+	}
+	if err := listenAndServeForgeAPI(httpServer, useTLS, *tlsCert, *tlsKey); err != nil {
 		logger.Error("forge_api_failed", "addr", *addr, "error", err.Error())
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+func forgeAPITLSConfig(certPath, keyPath, clientCAPath string, allowDevPlaintext bool) (*tls.Config, bool, error) {
+	certPath = strings.TrimSpace(certPath)
+	keyPath = strings.TrimSpace(keyPath)
+	clientCAPath = strings.TrimSpace(clientCAPath)
+	if certPath == "" && keyPath == "" {
+		if clientCAPath != "" {
+			return nil, false, fmt.Errorf("--client-ca requires --tls-cert and --tls-key")
+		}
+		if allowDevPlaintext {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("forge api requires --tls-cert and --tls-key unless --dev-insecure-http is set")
+	}
+	if certPath == "" || keyPath == "" {
+		return nil, false, fmt.Errorf("--tls-cert and --tls-key must be provided together")
+	}
+	config := &tls.Config{MinVersion: tls.VersionTLS12}
+	if clientCAPath != "" {
+		caPEM, err := os.ReadFile(clientCAPath)
+		if err != nil {
+			return nil, false, err
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(caPEM) {
+			return nil, false, fmt.Errorf("client ca %q does not contain a PEM certificate", clientCAPath)
+		}
+		config.ClientCAs = pool
+		config.ClientAuth = tls.RequireAndVerifyClientCert
+	}
+	return config, true, nil
+}
+
+func listenAndServeForgeAPI(server *http.Server, useTLS bool, certPath, keyPath string) error {
+	if useTLS {
+		return server.ListenAndServeTLS(certPath, keyPath)
+	}
+	return server.ListenAndServe()
 }
 
 func loadKLIQServiceTokenSecret(flagValue, filePath string, allowCLI bool) ([]byte, error) {
@@ -344,4 +445,25 @@ func validateOrSeedManagementTrustBundle(store management.Store, signer *signing
 		ExpiresAt: expiresAt,
 		Issuer:    "forge-management-dev-local",
 	})
+}
+
+func validateProvisionedManagementTrustBundle(store management.Store, keyID string) error {
+	keyID = strings.TrimSpace(keyID)
+	if keyID == "" {
+		return fmt.Errorf("remote management signer requires --management-signer-key-id")
+	}
+	existing, err := store.TrustBundle(context.Background(), keyID)
+	if err != nil {
+		return fmt.Errorf("management trust bundle %q is not provisioned for remote signer", keyID)
+	}
+	if existing.Purpose != "assignment_verification" {
+		return fmt.Errorf("management trust bundle %q has purpose %q, expected assignment_verification", keyID, existing.Purpose)
+	}
+	if existing.Status != "active" && existing.Status != "previous" {
+		return fmt.Errorf("management trust bundle %q is %q", keyID, existing.Status)
+	}
+	if !existing.ExpiresAt.IsZero() && !time.Now().UTC().Before(existing.ExpiresAt.UTC()) {
+		return fmt.Errorf("management trust bundle %q is expired", keyID)
+	}
+	return nil
 }

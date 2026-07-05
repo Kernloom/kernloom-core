@@ -18,6 +18,7 @@ import (
 	"github.com/kernloom/kernloom-core/internal/core/conformance"
 	corecontext "github.com/kernloom/kernloom-core/internal/core/context"
 	"github.com/kernloom/kernloom-core/internal/core/domain"
+	corerisk "github.com/kernloom/kernloom-core/internal/core/risk"
 	"github.com/kernloom/kernloom-core/internal/core/signing"
 	"github.com/kernloom/kernloom-core/internal/kliq/actionstate"
 	kliqbundle "github.com/kernloom/kernloom-core/internal/kliq/bundle"
@@ -41,6 +42,7 @@ type ExecuteRequest struct {
 	DecisionID                  string `json:"decision_id"`
 	EventType                   string `json:"event_type,omitempty"`
 	EventID                     string `json:"event_id,omitempty"`
+	RiskType                    string `json:"risk_type,omitempty"`
 	AdapterID                   string `json:"adapter_id"`
 	CapabilityID                string `json:"capability_id"`
 	CapabilityGrantID           string `json:"capability_grant_id"`
@@ -478,6 +480,12 @@ func (m Manager) ExecuteAction(ctx context.Context, req ExecuteRequest) (Execute
 	if err != nil {
 		return ExecuteResult{}, err
 	}
+	if len(plan.Actions) == 0 {
+		if err := m.Store.AppendRuntimeDecision(ctx, noActionRuntimeDecisionRecord(plan, m.now())); err != nil {
+			return ExecuteResult{}, err
+		}
+		return ExecuteResult{Plan: plan}, nil
+	}
 	return m.ExecutePlan(ctx, plan, signedBundle)
 }
 
@@ -561,13 +569,6 @@ func (m Manager) planFromRequest(ctx context.Context, req ExecuteRequest) (Runti
 	if !runtimeBundle.Spec.RuntimeAllowed {
 		return RuntimeActionPlan{}, nil, fmt.Errorf("runtime bundle %q does not allow runtime actions", runtimeBundle.Metadata.ID)
 	}
-	actionType := strings.TrimSpace(req.ActionType)
-	if actionType == "" {
-		return RuntimeActionPlan{}, nil, fmt.Errorf("runtime action type is required")
-	}
-	if !actionAllowed(runtimeBundle, actionType) {
-		return RuntimeActionPlan{}, nil, fmt.Errorf("runtime action %q is not allowed by bundle %q", actionType, runtimeBundle.Metadata.ID)
-	}
 	ttlText := strings.TrimSpace(req.TTL)
 	if ttlText == "" {
 		ttlText = runtimeBundle.Spec.MaxTTL
@@ -596,6 +597,34 @@ func (m Manager) planFromRequest(ctx context.Context, req ExecuteRequest) (Runti
 	targetKey := strings.TrimSpace(req.TargetKey)
 	if targetKey == "" {
 		return RuntimeActionPlan{}, nil, fmt.Errorf("target key is required")
+	}
+	actionType := strings.TrimSpace(req.ActionType)
+	riskContext := corerisk.RiskContext{}
+	if actionType == "" {
+		derivedAction, derivedRisk, actionable, err := m.actionFromRiskCache(ctx, runtimeBundle, strings.TrimSpace(req.RiskType))
+		if err != nil {
+			return RuntimeActionPlan{}, nil, err
+		}
+		riskContext = derivedRisk
+		if !actionable {
+			return RuntimeActionPlan{
+				PlanID:        "runtime_action_plan." + shortHash(runtimeBundle.Metadata.ID+"\x00"+decisionID),
+				DecisionID:    decisionID,
+				EventType:     strings.TrimSpace(req.EventType),
+				EventID:       strings.TrimSpace(req.EventID),
+				BundleID:      runtimeBundle.Metadata.ID,
+				PolicyID:      runtimeBundle.Metadata.PolicyID,
+				SourceCommit:  runtimeBundle.Metadata.SourceCommit,
+				CorrelationID: riskCorrelationID(req.CorrelationID, runtimeBundle.Metadata.CorrelationID, runtimeBundle.Metadata.ID, decisionID),
+			}, bundleRecord.EnvelopeJSON, nil
+		}
+		actionType = derivedAction
+	}
+	if actionType == "" {
+		return RuntimeActionPlan{}, nil, fmt.Errorf("runtime action type is required")
+	}
+	if !actionAllowed(runtimeBundle, actionType) {
+		return RuntimeActionPlan{}, nil, fmt.Errorf("runtime action %q is not allowed by bundle %q", actionType, runtimeBundle.Metadata.ID)
 	}
 	if err := validateCapabilityGrant(runtimeBundle, adapterID, capabilityID, actionType, targetScope, capabilityGrantID, ttl, m.now()); err != nil {
 		return RuntimeActionPlan{}, nil, err
@@ -638,10 +667,40 @@ func (m Manager) planFromRequest(ctx context.Context, req ExecuteRequest) (Runti
 				"reason":         reason,
 				"ttl":            ttlText,
 				"correlation_id": correlationID,
+				"risk_type":      riskContext.RiskType,
+				"risk_tier":      riskContext.Tier,
 			},
 		}},
 	}
 	return plan, bundleRecord.EnvelopeJSON, nil
+}
+
+func (m Manager) actionFromRiskCache(ctx context.Context, runtimeBundle corebundle.RuntimeBundle, requestedRiskType string) (string, corerisk.RiskContext, bool, error) {
+	riskType := corerisk.NormalizeType(requestedRiskType)
+	if riskType == "" {
+		return "", corerisk.RiskContext{}, false, fmt.Errorf("risk_type is required when action_type is omitted")
+	}
+	riskContext, err := m.Store.RiskContext(ctx, actionstate.RiskCacheKey{RiskType: riskType, Scope: corerisk.ScopeLocal}, m.now())
+	if err != nil {
+		return "", corerisk.RiskContext{}, false, err
+	}
+	behavior, ok := corerisk.MatchBehavior(runtimeBundle.Spec.RiskBehavior, riskContext)
+	if !ok {
+		return "", riskContext, false, nil
+	}
+	actionType, actionable := corerisk.RuntimeActionForEffect(behavior.Effect)
+	return actionType, riskContext, actionable, nil
+}
+
+func riskCorrelationID(requested, bundleCorrelationID, bundleID, decisionID string) string {
+	correlationID := strings.TrimSpace(requested)
+	if correlationID == "" {
+		correlationID = strings.TrimSpace(bundleCorrelationID)
+	}
+	if correlationID == "" {
+		correlationID = "correlation.local." + shortHash(bundleID+"\x00"+decisionID)
+	}
+	return correlationID
 }
 
 func runtimeDecisionRecord(plan RuntimeActionPlan, result RuntimeActionExecutionResult, now time.Time) actionstate.RuntimeDecisionRecord {
@@ -679,6 +738,33 @@ func runtimeDecisionRecord(plan RuntimeActionPlan, result RuntimeActionExecution
 		PayloadSHA256:   domain.SHA256JSON(data),
 		CreatedAt:       now.UTC(),
 		ActivatedAction: activatedAction,
+	}
+}
+
+func noActionRuntimeDecisionRecord(plan RuntimeActionPlan, now time.Time) actionstate.RuntimeDecisionRecord {
+	data, _ := json.Marshal(map[string]any{
+		"decision_id":    plan.DecisionID,
+		"event_type":     plan.EventType,
+		"event_id":       plan.EventID,
+		"plan_id":        plan.PlanID,
+		"bundle_id":      plan.BundleID,
+		"policy_id":      plan.PolicyID,
+		"source_commit":  plan.SourceCommit,
+		"correlation_id": plan.CorrelationID,
+		"status":         "no_action",
+	})
+	return actionstate.RuntimeDecisionRecord{
+		DecisionID:    plan.DecisionID,
+		PlanID:        plan.PlanID,
+		PolicyID:      plan.PolicyID,
+		BundleID:      plan.BundleID,
+		SourceCommit:  plan.SourceCommit,
+		CorrelationID: plan.CorrelationID,
+		EventType:     plan.EventType,
+		EventID:       plan.EventID,
+		Status:        "no_action",
+		PayloadSHA256: domain.SHA256JSON(data),
+		CreatedAt:     now.UTC(),
 	}
 }
 

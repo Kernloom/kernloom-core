@@ -31,6 +31,25 @@ func TestPostgresMigrationsAreVersionedAndCarryServiceIdentityColumns(t *testing
 	}
 }
 
+func TestPostgresMigrationsCarryRealityGraphTables(t *testing.T) {
+	migrations := postgresMigrations()
+	if len(migrations) < 3 {
+		t.Fatalf("expected reality graph migration, got %#v", migrations)
+	}
+	joined := strings.Join(migrations[2].Statements, "\n")
+	for _, table := range []string{
+		"reality_nodes",
+		"reality_edges",
+		"reality_observations",
+		"reality_snapshots",
+		"reality_findings",
+	} {
+		if !strings.Contains(joined, table) {
+			t.Fatalf("expected reality graph table %q in postgres migrations", table)
+		}
+	}
+}
+
 func TestMemoryStoreEnrollmentTokenSingleUseExpiryRevocationAndAudit(t *testing.T) {
 	store := NewMemoryStore()
 	ctx := context.Background()

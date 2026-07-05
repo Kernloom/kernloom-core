@@ -43,6 +43,8 @@ type RiskRecipe struct {
 	Output     map[string]string `yaml:"output" json:"output"`
 	Scoring    map[string]string `yaml:"scoring" json:"scoring"`
 	Thresholds map[string]string `yaml:"thresholds" json:"thresholds"`
+	Confidence map[string]string `yaml:"confidence,omitempty" json:"confidence,omitempty"`
+	Freshness  map[string]string `yaml:"freshness,omitempty" json:"freshness,omitempty"`
 }
 
 type Guardrail struct {

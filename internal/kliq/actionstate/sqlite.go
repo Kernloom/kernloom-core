@@ -5,7 +5,9 @@ package actionstate
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +17,8 @@ import (
 	"time"
 
 	"github.com/kernloom/kernloom-core/internal/core/domain"
+	corerisk "github.com/kernloom/kernloom-core/internal/core/risk"
+	"github.com/kernloom/kernloom-core/internal/kliq/baseline"
 	_ "modernc.org/sqlite"
 )
 
@@ -275,6 +279,81 @@ func sqliteMigrations() []sqliteMigration {
 					created_at TEXT NOT NULL,
 					activated_action TEXT NOT NULL DEFAULT ''
 				)`,
+			},
+		},
+		{
+			Version: 6,
+			Name:    "baseline_and_risk_cache",
+			Statements: []string{
+				`CREATE TABLE IF NOT EXISTS baseline_windows (
+					window_id TEXT PRIMARY KEY,
+					view TEXT NOT NULL,
+					entity TEXT NOT NULL,
+					metric TEXT NOT NULL,
+					started_at TEXT NOT NULL,
+					ended_at TEXT NOT NULL,
+					sample_count INTEGER NOT NULL,
+					confidence REAL NOT NULL,
+					clean INTEGER NOT NULL,
+					anomaly_fraction REAL NOT NULL,
+					window_json BLOB NOT NULL
+				)`,
+				`CREATE TABLE IF NOT EXISTS baseline_versions (
+					version_id TEXT PRIMARY KEY,
+					view TEXT NOT NULL,
+					entity TEXT NOT NULL,
+					created_at TEXT NOT NULL,
+					promoted_at TEXT NOT NULL DEFAULT '',
+					version_json BLOB NOT NULL
+				)`,
+				`CREATE UNIQUE INDEX IF NOT EXISTS baseline_versions_active
+					ON baseline_versions(view, entity)
+					WHERE promoted_at != ''`,
+				`CREATE TABLE IF NOT EXISTS baseline_stats (
+					version_id TEXT NOT NULL,
+					view TEXT NOT NULL,
+					entity TEXT NOT NULL,
+					metric TEXT NOT NULL,
+					center REAL NOT NULL,
+					spread REAL NOT NULL,
+					sample_count INTEGER NOT NULL,
+					frozen_at TEXT NOT NULL,
+					stats_json BLOB NOT NULL,
+					PRIMARY KEY(version_id, metric)
+				)`,
+				`CREATE TABLE IF NOT EXISTS baseline_deviation_events (
+					event_id TEXT PRIMARY KEY,
+					version_id TEXT NOT NULL,
+					view TEXT NOT NULL,
+					entity TEXT NOT NULL,
+					metric TEXT NOT NULL,
+					value REAL NOT NULL,
+					center REAL NOT NULL,
+					spread REAL NOT NULL,
+					score REAL NOT NULL,
+					observed_at TEXT NOT NULL,
+					emitted_at TEXT NOT NULL,
+					event_json BLOB NOT NULL
+				)`,
+				`CREATE TABLE IF NOT EXISTS risk_cache (
+					risk_type TEXT NOT NULL,
+					scope TEXT NOT NULL,
+					tier TEXT NOT NULL,
+					evaluated_at TEXT NOT NULL,
+					valid_until TEXT NOT NULL,
+					source TEXT NOT NULL,
+					context_json BLOB NOT NULL,
+					PRIMARY KEY(risk_type, scope)
+				)`,
+			},
+		},
+		{
+			Version: 7,
+			Name:    "audit_spool_hash_chain",
+			Statements: []string{
+				`ALTER TABLE audit_spool ADD COLUMN previous_hash TEXT NOT NULL DEFAULT ''`,
+				`ALTER TABLE audit_spool ADD COLUMN record_hash TEXT NOT NULL DEFAULT ''`,
+				`CREATE INDEX IF NOT EXISTS audit_spool_record_hash_idx ON audit_spool(record_hash)`,
 			},
 		},
 	}
@@ -931,13 +1010,27 @@ func (s *SQLiteStore) AppendAudit(ctx context.Context, record AuditRecord) error
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO audit_spool (id, runtime_action_id, status, payload, payload_sha256, created_at, retry_count, last_attempt_at, uploaded_at, last_error)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	if record.CreatedAt.IsZero() {
+		record.CreatedAt = time.Now().UTC()
+	}
+	if record.PreviousHash == "" {
+		record.PreviousHash, err = s.latestAuditRecordHash(ctx)
+		if err != nil {
+			return err
+		}
+	}
+	if record.RecordHash == "" {
+		record.RecordHash = auditRecordHash(record)
+	}
+	_, err = s.db.ExecContext(ctx, `INSERT INTO audit_spool (id, runtime_action_id, status, payload, payload_sha256, previous_hash, record_hash, created_at, retry_count, last_attempt_at, uploaded_at, last_error)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		record.ID,
 		record.RuntimeActionID,
 		record.Status,
 		record.Payload,
 		record.PayloadSHA256,
+		record.PreviousHash,
+		record.RecordHash,
 		formatTime(record.CreatedAt),
 		record.RetryCount,
 		formatOptionalTime(record.LastAttemptAt),
@@ -948,7 +1041,7 @@ func (s *SQLiteStore) AppendAudit(ctx context.Context, record AuditRecord) error
 }
 
 func (s *SQLiteStore) PendingAudits(ctx context.Context) ([]AuditRecord, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, runtime_action_id, status, payload, payload_sha256, created_at, retry_count, last_attempt_at, uploaded_at, last_error
+	rows, err := s.db.QueryContext(ctx, `SELECT id, runtime_action_id, status, payload, payload_sha256, previous_hash, record_hash, created_at, retry_count, last_attempt_at, uploaded_at, last_error
 		FROM audit_spool WHERE status = ? ORDER BY created_at`, "pending_upload")
 	if err != nil {
 		return nil, err
@@ -958,11 +1051,14 @@ func (s *SQLiteStore) PendingAudits(ctx context.Context) ([]AuditRecord, error) 
 	for rows.Next() {
 		var record AuditRecord
 		var createdAt, lastAttemptAt, uploadedAt string
-		if err := rows.Scan(&record.ID, &record.RuntimeActionID, &record.Status, &record.Payload, &record.PayloadSHA256, &createdAt, &record.RetryCount, &lastAttemptAt, &uploadedAt, &record.LastError); err != nil {
+		if err := rows.Scan(&record.ID, &record.RuntimeActionID, &record.Status, &record.Payload, &record.PayloadSHA256, &record.PreviousHash, &record.RecordHash, &createdAt, &record.RetryCount, &lastAttemptAt, &uploadedAt, &record.LastError); err != nil {
 			return nil, err
 		}
 		if record.PayloadSHA256 == "" {
 			record.PayloadSHA256 = domain.SHA256JSON([]byte(record.Payload))
+		}
+		if record.RecordHash == "" {
+			record.RecordHash = auditRecordHash(record)
 		}
 		parsed, err := parseTime(createdAt)
 		if err != nil {
@@ -980,6 +1076,27 @@ func (s *SQLiteStore) PendingAudits(ctx context.Context) ([]AuditRecord, error) 
 		records = append(records, record)
 	}
 	return records, rows.Err()
+}
+
+func (s *SQLiteStore) latestAuditRecordHash(ctx context.Context) (string, error) {
+	var hash string
+	err := s.db.QueryRowContext(ctx, `SELECT record_hash FROM audit_spool WHERE record_hash != '' ORDER BY created_at DESC, id DESC LIMIT 1`).Scan(&hash)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return hash, err
+}
+
+func auditRecordHash(record AuditRecord) string {
+	sum := sha256.Sum256([]byte(strings.Join([]string{
+		record.PreviousHash,
+		record.ID,
+		record.RuntimeActionID,
+		record.Status,
+		record.PayloadSHA256,
+		formatTime(record.CreatedAt),
+	}, "\x00")))
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 func (s *SQLiteStore) MarkAuditUploaded(ctx context.Context, id string, uploadedAt time.Time) error {
@@ -1070,6 +1187,237 @@ func (s *SQLiteStore) RuntimeDecisions(ctx context.Context, limit int) ([]Runtim
 		records = append(records, record)
 	}
 	return records, rows.Err()
+}
+
+func (s *SQLiteStore) SaveBaselineWindow(ctx context.Context, window baseline.Window) error {
+	if window.WindowID == "" || window.Key.View == "" || window.Key.Entity == "" || window.Metric == "" {
+		return fmt.Errorf("baseline window requires id, key and metric")
+	}
+	data, err := json.Marshal(window)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `INSERT INTO baseline_windows (
+		window_id, view, entity, metric, started_at, ended_at, sample_count, confidence, clean, anomaly_fraction, window_json
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	ON CONFLICT(window_id) DO UPDATE SET window_json = excluded.window_json`,
+		window.WindowID,
+		window.Key.View,
+		window.Key.Entity,
+		window.Metric,
+		formatTime(window.StartedAt),
+		formatTime(window.EndedAt),
+		window.SampleCount,
+		window.Confidence,
+		boolInt(window.Clean),
+		window.AnomalyFraction,
+		data,
+	)
+	return err
+}
+
+func (s *SQLiteStore) SaveBaselineVersion(ctx context.Context, version baseline.VersionRef, stats []baseline.Stats, promote bool) error {
+	if version.VersionID == "" || version.View == "" || version.Entity == "" {
+		return fmt.Errorf("baseline version requires id, view and entity")
+	}
+	if version.CreatedAt.IsZero() {
+		version.CreatedAt = time.Now().UTC()
+	}
+	if promote && version.PromotedAt.IsZero() {
+		version.PromotedAt = time.Now().UTC()
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if promote {
+		if _, err := tx.ExecContext(ctx, `UPDATE baseline_versions SET promoted_at = '' WHERE view = ? AND entity = ?`, version.View, version.Entity); err != nil {
+			return err
+		}
+	}
+	data, err := json.Marshal(version)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO baseline_versions (
+		version_id, view, entity, created_at, promoted_at, version_json
+	) VALUES (?, ?, ?, ?, ?, ?)
+	ON CONFLICT(version_id) DO UPDATE SET
+		promoted_at = excluded.promoted_at,
+		version_json = excluded.version_json`,
+		version.VersionID,
+		version.View,
+		version.Entity,
+		formatTime(version.CreatedAt),
+		formatOptionalTime(version.PromotedAt),
+		data,
+	); err != nil {
+		return err
+	}
+	for _, stat := range stats {
+		if stat.VersionID == "" {
+			stat.VersionID = version.VersionID
+		}
+		if stat.Key.View == "" {
+			stat.Key.View = version.View
+		}
+		if stat.Key.Entity == "" {
+			stat.Key.Entity = version.Entity
+		}
+		if stat.Metric == "" {
+			return fmt.Errorf("baseline stats require metric")
+		}
+		if stat.FrozenAt.IsZero() {
+			stat.FrozenAt = version.CreatedAt
+		}
+		statData, err := json.Marshal(stat)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO baseline_stats (
+			version_id, view, entity, metric, center, spread, sample_count, frozen_at, stats_json
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(version_id, metric) DO UPDATE SET
+			center = excluded.center,
+			spread = excluded.spread,
+			sample_count = excluded.sample_count,
+			frozen_at = excluded.frozen_at,
+			stats_json = excluded.stats_json`,
+			stat.VersionID,
+			stat.Key.View,
+			stat.Key.Entity,
+			stat.Metric,
+			stat.Center,
+			stat.Spread,
+			stat.SampleCount,
+			formatTime(stat.FrozenAt),
+			statData,
+		); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *SQLiteStore) ActiveBaselineVersion(ctx context.Context, view, entity string) (baseline.VersionRef, bool, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT version_json FROM baseline_versions
+		WHERE view = ? AND entity = ? AND promoted_at != ''
+		ORDER BY promoted_at DESC LIMIT 1`, view, entity)
+	var data []byte
+	if err := row.Scan(&data); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return baseline.VersionRef{}, false, nil
+		}
+		return baseline.VersionRef{}, false, err
+	}
+	var version baseline.VersionRef
+	if err := json.Unmarshal(data, &version); err != nil {
+		return baseline.VersionRef{}, false, err
+	}
+	return version, true, nil
+}
+
+func (s *SQLiteStore) BaselineStats(ctx context.Context, versionID, metric string) (baseline.Stats, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT stats_json FROM baseline_stats WHERE version_id = ? AND metric = ?`, versionID, metric)
+	var data []byte
+	if err := row.Scan(&data); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return baseline.Stats{}, ErrNotFound
+		}
+		return baseline.Stats{}, err
+	}
+	var stats baseline.Stats
+	return stats, json.Unmarshal(data, &stats)
+}
+
+func (s *SQLiteStore) SaveBaselineDeviation(ctx context.Context, event baseline.DeviationEvent) error {
+	if event.EventID == "" || event.VersionID == "" || event.Key.View == "" || event.Key.Entity == "" || event.Metric == "" {
+		return fmt.Errorf("baseline deviation requires id, version, key and metric")
+	}
+	if event.EmittedAt.IsZero() {
+		event.EmittedAt = time.Now().UTC()
+	}
+	data, err := json.Marshal(event)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `INSERT INTO baseline_deviation_events (
+		event_id, version_id, view, entity, metric, value, center, spread, score, observed_at, emitted_at, event_json
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	ON CONFLICT(event_id) DO UPDATE SET event_json = excluded.event_json`,
+		event.EventID,
+		event.VersionID,
+		event.Key.View,
+		event.Key.Entity,
+		event.Metric,
+		event.Value,
+		event.Center,
+		event.Spread,
+		event.Score,
+		formatTime(event.ObservedAt),
+		formatTime(event.EmittedAt),
+		data,
+	)
+	return err
+}
+
+func (s *SQLiteStore) SaveRiskContext(ctx context.Context, key RiskCacheKey, riskContext corerisk.RiskContext) error {
+	key.RiskType = corerisk.NormalizeType(key.RiskType)
+	if key.RiskType == "" {
+		key.RiskType = corerisk.NormalizeType(riskContext.RiskType)
+	}
+	if key.Scope == "" {
+		key.Scope = riskContext.Scope
+	}
+	if err := corerisk.ValidateContext(riskContext, time.Time{}); err != nil && riskContext.Tier != corerisk.TierUnknown {
+		return err
+	}
+	data, err := json.Marshal(riskContext)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `INSERT INTO risk_cache (
+		risk_type, scope, tier, evaluated_at, valid_until, source, context_json
+	) VALUES (?, ?, ?, ?, ?, ?, ?)
+	ON CONFLICT(risk_type, scope) DO UPDATE SET
+		tier = excluded.tier,
+		evaluated_at = excluded.evaluated_at,
+		valid_until = excluded.valid_until,
+		source = excluded.source,
+		context_json = excluded.context_json`,
+		key.RiskType,
+		key.Scope,
+		riskContext.Tier,
+		formatTime(riskContext.EvaluatedAt),
+		formatTime(riskContext.ValidUntil),
+		riskContext.Source,
+		data,
+	)
+	return err
+}
+
+func (s *SQLiteStore) RiskContext(ctx context.Context, key RiskCacheKey, now time.Time) (corerisk.RiskContext, error) {
+	key.RiskType = corerisk.NormalizeType(key.RiskType)
+	if key.Scope == "" {
+		key.Scope = corerisk.ScopeLocal
+	}
+	row := s.db.QueryRowContext(ctx, `SELECT context_json FROM risk_cache WHERE risk_type = ? AND scope = ?`, key.RiskType, key.Scope)
+	var data []byte
+	if err := row.Scan(&data); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return corerisk.UnknownContext(key.RiskType, key.Scope, "risk_cache", now, "risk context missing"), nil
+		}
+		return corerisk.RiskContext{}, err
+	}
+	var riskContext corerisk.RiskContext
+	if err := json.Unmarshal(data, &riskContext); err != nil {
+		return corerisk.RiskContext{}, err
+	}
+	if err := corerisk.ValidateContext(riskContext, now); err != nil {
+		return corerisk.UnknownContext(key.RiskType, key.Scope, "risk_cache", now, err.Error()), nil
+	}
+	return riskContext, nil
 }
 
 type rowScanner interface {

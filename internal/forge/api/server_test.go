@@ -7,11 +7,16 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/rsa"
+	"crypto/tls"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -472,6 +477,41 @@ func TestApprovePolicyBuildManifestMakesPlannerReachable(t *testing.T) {
 	}
 }
 
+func TestApprovePolicyBuildManifestRejectsSelfApproval(t *testing.T) {
+	store := management.NewMemoryStore()
+	signer := testManagementSigner(t)
+	artifacts := artifactstore.NewMemoryStore()
+	pendingBuildRef := putPendingBuildManifestCreatedBy(t, artifacts, signer, "abc123", "reviewer", map[string]coreartifact.Ref{
+		"runtime_bundle": {URI: "memory://runtime-bundle", SHA256: "sha256:runtime"},
+	})
+	server := Server{
+		Authenticator:  authn.DevTokenVerifier{},
+		Authorizer:     authz.Authorizer{},
+		Store:          jobs.NewMemoryStore(),
+		Management:     store,
+		ManagementSign: signer,
+		Artifacts:      artifacts,
+	}
+	approvalReq := buildApprovalRequest{
+		BuildRef:    pendingBuildRef,
+		Environment: "prod",
+		Stage:       "prod",
+		Scope:       "edge-prod",
+		AuthorityID: "change.review.self",
+	}
+	approvalBody, err := json.Marshal(approvalReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/policy-build-manifests/approve", bytes.NewReader(approvalBody))
+	req.Header.Set("Authorization", "Bearer dev:reviewer:policy-reviewer:acme:prod:prod")
+	server.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "self_approval") {
+		t.Fatalf("expected self approval rejection, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestProductionAssignmentPlannerRejectsArtifactOutsideApprovedBuild(t *testing.T) {
 	store := management.NewMemoryStore()
 	registration := testRegistration("kliq.artifact-outside-build", "node-artifact-outside-build")
@@ -692,6 +732,75 @@ func TestProductionAssignmentPlannerRejectsApprovedBuildScopeMismatch(t *testing
 
 	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "approved_build_scope_mismatch") {
 		t.Fatalf("expected approved build scope mismatch, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestProductionAssignmentPlannerRejectsSelfApprovedBuild(t *testing.T) {
+	store := management.NewMemoryStore()
+	registration := testRegistration("kliq.self-approved-build", "node-self-approved-build")
+	if err := store.Register(t.Context(), registration); err != nil {
+		t.Fatal(err)
+	}
+	signer := testManagementSigner(t)
+	artifacts := artifactstore.NewMemoryStore()
+	runtimeEnvelope, err := signer.Sign(t.Context(), []byte(`{"kind":"RuntimeBundle","metadata":{"policy_id":"policy.test"}}`), signing.Metadata{
+		SourceCommit: "abc123",
+		PolicyID:     "policy.test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimePayload, err := json.Marshal(runtimeEnvelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeRef, err := artifacts.Put(t.Context(), coreartifact.Artifact{
+		Metadata: coreartifact.Metadata{ID: "runtime_bundle.self-approved", PolicyID: "policy.test", ArtifactType: "runtime_bundle_signed_envelope", SourceCommit: "abc123"},
+		Payload:  runtimePayload,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	selfApprovedRef := putBuildManifestCreatedBy(t, artifacts, signer, "abc123", "author", compiler.ManifestApproval{
+		Status:        "approved",
+		ApprovedBy:    "author",
+		ApprovedAt:    time.Now().UTC(),
+		AuthorityID:   "change.review.self",
+		AuthorityKind: "forge-management-signature",
+		Environment:   registration.Environment,
+		Stage:         registration.Stage,
+		Scope:         registration.Scope,
+	}, map[string]coreartifact.Ref{"runtime_bundle": runtimeRef})
+	server := Server{
+		Authenticator:  authn.DevTokenVerifier{},
+		Authorizer:     authz.Authorizer{},
+		Store:          jobs.NewMemoryStore(),
+		Management:     store,
+		ManagementSign: signer,
+		Artifacts:      artifacts,
+	}
+	plan := assignmentPlanRequest{
+		KLIQID:           registration.KLIQID,
+		SourceCommit:     "abc123",
+		ApprovedBuildRef: selfApprovedRef,
+		ExpiresAt:        time.Now().Add(time.Hour).UTC(),
+		Artifacts: []domain.KLIQAssignedArtifact{{
+			ArtifactType: "runtime_bundle",
+			ArtifactID:   "runtime_bundle.self-approved",
+			ArtifactRef:  runtimeRef.URI,
+			SHA256:       runtimeRef.SHA256,
+		}},
+	}
+	body, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/kliq/assignments", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer dev:ops:operator:acme:prod:prod")
+	server.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "approved_build_self_approval_rejected") {
+		t.Fatalf("expected self-approved build rejection, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -951,6 +1060,65 @@ func TestManagementRevocationAuditIncludesActorAndTarget(t *testing.T) {
 	}
 }
 
+func TestForgeAPIMTLSSPIFFEPeerCertificateAuthenticatesKLIQ(t *testing.T) {
+	store := management.NewMemoryStore()
+	registration := testRegistration("kliq.mtls", "node-mtls")
+	spiffeID := authn.DefaultKLIQSPIFFEID(registration.KLIQID, registration.Environment, registration.Stage, registration.Scope)
+	registration.Identity.ServiceIdentityProvider = authn.ServiceIdentityProviderSPIFFEReady
+	registration.Identity.SPIFFEID = spiffeID
+	registration.Identity.CredentialStatus = "active"
+	registration.Identity.CredentialExpiresAt = time.Now().UTC().Add(time.Hour)
+	if err := store.Register(t.Context(), registration); err != nil {
+		t.Fatal(err)
+	}
+	server := Server{
+		Authenticator: authn.Chain{authn.KLIQMTLSSPIFFEVerifier{Store: store}},
+		Authorizer:    authz.Authorizer{},
+		Store:         jobs.NewMemoryStore(),
+		Management:    store,
+	}
+	caCert, caKey := testCertificateAuthority(t)
+	clientCert := testClientCertificate(t, caCert, caKey, spiffeID)
+	clientCAs := x509.NewCertPool()
+	clientCAs.AddCert(caCert)
+	tlsServer := httptest.NewUnstartedServer(server.Handler())
+	tlsServer.TLS = &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		ClientAuth: tls.RequireAndVerifyClientCert,
+		ClientCAs:  clientCAs,
+	}
+	tlsServer.StartTLS()
+	defer tlsServer.Close()
+	client := tlsServer.Client()
+	transport := client.Transport.(*http.Transport).Clone()
+	if transport.TLSClientConfig == nil {
+		transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+	} else {
+		transport.TLSClientConfig = transport.TLSClientConfig.Clone()
+	}
+	transport.TLSClientConfig.Certificates = []tls.Certificate{clientCert}
+	client.Transport = transport
+	req, err := http.NewRequest(http.MethodGet, tlsServer.URL+"/v1/me", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected mTLS SPIFFE auth to reach /v1/me, got %s", resp.Status)
+	}
+	var principal authn.Principal
+	if err := json.NewDecoder(resp.Body).Decode(&principal); err != nil {
+		t.Fatal(err)
+	}
+	if principal.Subject != "kliq:"+registration.KLIQID || authn.PrincipalSPIFFEID(principal) != spiffeID {
+		t.Fatalf("expected KLIQ SPIFFE principal, got %#v", principal)
+	}
+}
+
 func testRegistration(kliqID, nodeID string) domain.KLIQRegistration {
 	return domain.KLIQRegistration{
 		RegistrationID: "registration." + kliqID,
@@ -998,6 +1166,73 @@ func validPublicKeyPEM(t *testing.T) string {
 	return string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: data}))
 }
 
+func testCertificateAuthority(t *testing.T) (*x509.Certificate, *rsa.PrivateKey) {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkixName("kernloom-test-ca"),
+		NotBefore:             time.Now().UTC().Add(-time.Minute),
+		NotAfter:              time.Now().UTC().Add(time.Hour),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cert, key
+}
+
+func testClientCertificate(t *testing.T, caCert *x509.Certificate, caKey *rsa.PrivateKey, spiffeID string) tls.Certificate {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	uri, err := url.Parse(spiffeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(2),
+		Subject:      pkixName("kliq-client"),
+		NotBefore:    time.Now().UTC().Add(-time.Minute),
+		NotAfter:     time.Now().UTC().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+		URIs:         []*url.URL{uri},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, caCert, &key.PublicKey, caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := tls.X509KeyPair(
+		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
+		pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cert
+}
+
+func pkixName(commonName string) pkix.Name {
+	return pkix.Name{CommonName: commonName}
+}
+
 func quoteJSON(value string) string {
 	data, _ := json.Marshal(value)
 	return string(data)
@@ -1030,10 +1265,20 @@ func putApprovedBuildManifest(t *testing.T, store *artifactstore.MemoryStore, si
 
 func putPendingBuildManifest(t *testing.T, store *artifactstore.MemoryStore, signer *signing.DevLocalSigner, sourceCommit string, outputs map[string]coreartifact.Ref) coreartifact.Ref {
 	t.Helper()
-	return putBuildManifest(t, store, signer, sourceCommit, compiler.ManifestApproval{Status: "pending_review"}, outputs)
+	return putPendingBuildManifestCreatedBy(t, store, signer, sourceCommit, "author", outputs)
+}
+
+func putPendingBuildManifestCreatedBy(t *testing.T, store *artifactstore.MemoryStore, signer *signing.DevLocalSigner, sourceCommit, createdBy string, outputs map[string]coreartifact.Ref) coreartifact.Ref {
+	t.Helper()
+	return putBuildManifestCreatedBy(t, store, signer, sourceCommit, createdBy, compiler.ManifestApproval{Status: "pending_review"}, outputs)
 }
 
 func putBuildManifest(t *testing.T, store *artifactstore.MemoryStore, signer *signing.DevLocalSigner, sourceCommit string, approval compiler.ManifestApproval, outputs map[string]coreartifact.Ref) coreartifact.Ref {
+	t.Helper()
+	return putBuildManifestCreatedBy(t, store, signer, sourceCommit, "author", approval, outputs)
+}
+
+func putBuildManifestCreatedBy(t *testing.T, store *artifactstore.MemoryStore, signer *signing.DevLocalSigner, sourceCommit, createdBy string, approval compiler.ManifestApproval, outputs map[string]coreartifact.Ref) coreartifact.Ref {
 	t.Helper()
 	if outputs == nil {
 		outputs = map[string]coreartifact.Ref{}
@@ -1047,6 +1292,7 @@ func putBuildManifest(t *testing.T, store *artifactstore.MemoryStore, signer *si
 		Metadata: compiler.ManifestMetadata{
 			ID:            "build.test." + strings.ReplaceAll(sourceCommit, "/", "-"),
 			CorrelationID: "correlation.test",
+			CreatedBy:     createdBy,
 		},
 		Approval: approval,
 		Spec: compiler.ManifestSpec{

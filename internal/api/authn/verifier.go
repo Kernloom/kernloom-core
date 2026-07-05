@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 )
@@ -23,12 +24,35 @@ type Verifier interface {
 	Verify(ctx context.Context, token string) (Principal, error)
 }
 
+type RequestVerifier interface {
+	VerifyRequest(ctx context.Context, r *http.Request) (Principal, error)
+}
+
 type Chain []Verifier
 
 func (c Chain) Verify(ctx context.Context, token string) (Principal, error) {
 	var lastErr error
 	for _, verifier := range c {
 		principal, err := verifier.Verify(ctx, token)
+		if err == nil {
+			return principal, nil
+		}
+		lastErr = err
+	}
+	if lastErr != nil {
+		return Principal{}, lastErr
+	}
+	return Principal{}, ErrUnauthenticated
+}
+
+func (c Chain) VerifyRequest(ctx context.Context, r *http.Request) (Principal, error) {
+	var lastErr error
+	for _, verifier := range c {
+		requestVerifier, ok := verifier.(RequestVerifier)
+		if !ok {
+			continue
+		}
+		principal, err := requestVerifier.VerifyRequest(ctx, r)
 		if err == nil {
 			return principal, nil
 		}

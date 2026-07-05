@@ -4,8 +4,10 @@
 package main
 
 import (
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/hex"
 	"fmt"
 	"net/url"
 	"os"
@@ -22,6 +24,7 @@ type adapterTransportOptions struct {
 	ClientCertPath              string
 	ClientKeyPath               string
 	ServerName                  string
+	ServerCertificateSHA256     string
 }
 
 func validateSecureForgeURL(rawURL string, allowDevInsecure bool) error {
@@ -70,6 +73,19 @@ func adapterDialOptions(opts adapterTransportOptions) ([]grpc.DialOption, error)
 		RootCAs:      roots,
 		Certificates: []tls.Certificate{clientCert},
 		ServerName:   strings.TrimSpace(opts.ServerName),
+	}
+	if pin := strings.TrimSpace(opts.ServerCertificateSHA256); pin != "" {
+		tlsConfig.VerifyPeerCertificate = func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+			if len(rawCerts) == 0 {
+				return fmt.Errorf("adapter tls pin requires peer certificate")
+			}
+			sum := sha256.Sum256(rawCerts[0])
+			got := "sha256:" + hex.EncodeToString(sum[:])
+			if got != pin {
+				return fmt.Errorf("adapter tls server certificate pin mismatch")
+			}
+			return nil
+		}
 	}
 	return []grpc.DialOption{grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig))}, nil
 }

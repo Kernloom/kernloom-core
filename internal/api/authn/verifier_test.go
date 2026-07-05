@@ -11,10 +11,13 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"net/http"
+	"net/url"
 	"testing"
 	"time"
 
@@ -125,6 +128,38 @@ func TestKLIQIdentityTokenVerifierUsesRegisteredPublicKey(t *testing.T) {
 	}
 	if principal.Subject != "kliq:kliq.test" || !principal.HasRole(KLIQServiceRole) || PrincipalSPIFFEID(principal) != identity.SPIFFEID {
 		t.Fatalf("unexpected principal %#v", principal)
+	}
+}
+
+func TestKLIQMTLSSPIFFEVerifierUsesRegisteredIdentity(t *testing.T) {
+	now := time.Date(2026, 7, 4, 12, 0, 0, 0, time.UTC)
+	spiffeID := DefaultKLIQSPIFFEID("kliq.test", "prod", "prod", "edge-prod")
+	uri, err := url.Parse(spiffeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity := domain.KLIQIdentity{
+		KLIQID:                  "kliq.test",
+		NodeID:                  "node-1",
+		Environment:             "prod",
+		Stage:                   "prod",
+		Scope:                   "edge-prod",
+		ServiceIdentityProvider: ServiceIdentityProviderSPIFFEReady,
+		SPIFFEID:                spiffeID,
+		CredentialStatus:        "active",
+		Status:                  "active",
+		CredentialExpiresAt:     now.Add(time.Hour),
+	}
+	req := &http.Request{TLS: &tls.ConnectionState{PeerCertificates: []*x509.Certificate{{URIs: []*url.URL{uri}}}}}
+	principal, err := (KLIQMTLSSPIFFEVerifier{
+		Store: testIdentityStore{identity: identity},
+		Now:   func() time.Time { return now },
+	}).VerifyRequest(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if principal.Subject != "kliq:kliq.test" || PrincipalSPIFFEID(principal) != spiffeID {
+		t.Fatalf("unexpected mTLS principal %#v", principal)
 	}
 }
 

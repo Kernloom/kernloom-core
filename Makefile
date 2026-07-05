@@ -5,7 +5,7 @@ GOVULNCHECK ?= govulncheck
 DIST ?= dist
 IMAGE ?=
 
-BINARIES := forge forge-worker kliq correlate proof-issuer conformance-worker kernloomctl
+BINARIES := forge forge-signer forge-worker kliq correlate proof-issuer conformance-worker kernloomctl
 
 .PHONY: fmt vet test build checksums sbom vuln-scan govulncheck release-provenance release-sign container-sign release-promote-check release-check
 
@@ -21,6 +21,7 @@ test:
 build:
 	mkdir -p bin
 	$(GO) build -o bin/forge ./cmd/forge
+	$(GO) build -o bin/forge-signer ./cmd/forge-signer
 	$(GO) build -o bin/forge-worker ./cmd/forge-worker
 	$(GO) build -o bin/kliq ./cmd/kliq
 	$(GO) build -o bin/correlate ./cmd/correlate

@@ -6,6 +6,8 @@ package main
 import (
 	"strings"
 	"testing"
+
+	"github.com/kernloom/kernloom-core/internal/core/domain"
 )
 
 func TestValidateSecureForgeURLRejectsHTTPWithoutDevFlag(t *testing.T) {
@@ -32,5 +34,30 @@ func TestAdapterDialOptionsRejectsPlaintextWithoutDevFlag(t *testing.T) {
 	}
 	if len(opts) == 0 {
 		t.Fatal("expected grpc dial options")
+	}
+}
+
+func TestAdapterTransportForAssignmentPinsIdentity(t *testing.T) {
+	base := adapterTransportOptions{
+		CAPath:                  "ca.pem",
+		ClientCertPath:          "client.pem",
+		ClientKeyPath:           "client.key",
+		ServerName:              "global.example",
+		ServerCertificateSHA256: "sha256:global",
+	}
+	got := adapterTransportForAssignment(base, domain.AdapterAssignment{
+		AdapterID:               "kernloom.adapter.klshield",
+		Endpoint:                "klshield.internal:7443",
+		TLSServerName:           "klshield.internal",
+		ServerCertificateSHA256: "sha256:adapter",
+	})
+	if got.ServerName != "klshield.internal" {
+		t.Fatalf("expected assignment server name pin, got %q", got.ServerName)
+	}
+	if got.ServerCertificateSHA256 != "sha256:adapter" {
+		t.Fatalf("expected assignment certificate pin, got %q", got.ServerCertificateSHA256)
+	}
+	if base.ServerName != "global.example" || base.ServerCertificateSHA256 != "sha256:global" {
+		t.Fatalf("base transport was mutated: %#v", base)
 	}
 }

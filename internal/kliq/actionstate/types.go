@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/kernloom/kernloom-core/internal/core/domain"
+	corerisk "github.com/kernloom/kernloom-core/internal/core/risk"
+	"github.com/kernloom/kernloom-core/internal/kliq/baseline"
 )
 
 var ErrNotFound = errors.New("kliq state record not found")
@@ -195,6 +197,8 @@ type AuditRecord struct {
 	Status          string
 	Payload         string
 	PayloadSHA256   string
+	PreviousHash    string
+	RecordHash      string
 	CreatedAt       time.Time
 	RetryCount      int
 	LastAttemptAt   time.Time
@@ -215,6 +219,11 @@ type RuntimeDecisionRecord struct {
 	PayloadSHA256   string
 	CreatedAt       time.Time
 	ActivatedAction string
+}
+
+type RiskCacheKey struct {
+	RiskType string
+	Scope    string
 }
 
 type Store interface {
@@ -243,5 +252,12 @@ type Store interface {
 	MarkAuditFailed(ctx context.Context, id string, attemptedAt time.Time, message string) error
 	AppendRuntimeDecision(ctx context.Context, record RuntimeDecisionRecord) error
 	RuntimeDecisions(ctx context.Context, limit int) ([]RuntimeDecisionRecord, error)
+	SaveBaselineWindow(ctx context.Context, window baseline.Window) error
+	SaveBaselineVersion(ctx context.Context, version baseline.VersionRef, stats []baseline.Stats, promote bool) error
+	ActiveBaselineVersion(ctx context.Context, view, entity string) (baseline.VersionRef, bool, error)
+	BaselineStats(ctx context.Context, versionID, metric string) (baseline.Stats, error)
+	SaveBaselineDeviation(ctx context.Context, event baseline.DeviationEvent) error
+	SaveRiskContext(ctx context.Context, key RiskCacheKey, riskContext corerisk.RiskContext) error
+	RiskContext(ctx context.Context, key RiskCacheKey, now time.Time) (corerisk.RiskContext, error)
 	Close() error
 }

@@ -21,6 +21,7 @@ import (
 	"github.com/kernloom/kernloom-core/internal/core/conformance"
 	corecontext "github.com/kernloom/kernloom-core/internal/core/context"
 	"github.com/kernloom/kernloom-core/internal/core/domain"
+	corerisk "github.com/kernloom/kernloom-core/internal/core/risk"
 	"github.com/kernloom/kernloom-core/internal/core/signing"
 	"github.com/kernloom/kernloom-core/internal/kliq/actionstate"
 	kliqbundle "github.com/kernloom/kernloom-core/internal/kliq/bundle"
@@ -605,6 +606,84 @@ func TestManagerRequiresAuditIDOrExplicitDecisionDerivedAuditID(t *testing.T) {
 	}
 }
 
+func TestManagerDerivesRuntimeActionFromRiskCacheAndPolicyBehavior(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC)
+	store := openTestStore(t)
+	defer store.Close()
+	signer := testSigner(t, now)
+	executor := recordingExecutor{}
+	manager := testManager(store, signer, now, testAdapter(testAdapterID, &executor))
+	loadTestBundle(t, manager, ctx, signer, now, now.Add(time.Hour))
+	score := 95.0
+	if err := store.SaveRiskContext(ctx, actionstate.RiskCacheKey{RiskType: "runtime_anomaly", Scope: corerisk.ScopeLocal}, corerisk.RiskContext{
+		RiskType:    "runtime_anomaly",
+		Tier:        corerisk.TierCritical,
+		Score:       &score,
+		Confidence:  0.95,
+		Source:      "baseline.local",
+		Scope:       corerisk.ScopeLocal,
+		EvaluatedAt: now,
+		ValidUntil:  time.Now().UTC().Add(time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := manager.ExecuteAction(ctx, ExecuteRequest{
+		DecisionID:        "decision.risk-critical",
+		RiskType:          "runtime_anomaly",
+		AdapterID:         testAdapterID,
+		CapabilityID:      testCapabilityID,
+		CapabilityGrantID: testCapabilityGrantID,
+		Mode:              ActionModeRequired,
+		TargetScope:       "source",
+		TargetKey:         "source-risk",
+		Reason:            "risk behavior authorized mitigation",
+		AuditID:           "audit.risk-critical",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Results) != 1 || result.Results[0].Lease.ActionType != "runtime_action.deny_temporarily_source" || executor.calls != 1 {
+		t.Fatalf("expected risk-derived runtime action, result=%#v calls=%d", result, executor.calls)
+	}
+}
+
+func TestManagerRiskUnknownObserveProducesNoRuntimeAction(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC)
+	store := openTestStore(t)
+	defer store.Close()
+	signer := testSigner(t, now)
+	executor := recordingExecutor{}
+	manager := testManager(store, signer, now, testAdapter(testAdapterID, &executor))
+	loadTestBundle(t, manager, ctx, signer, now, now.Add(time.Hour))
+	result, err := manager.ExecuteAction(ctx, ExecuteRequest{
+		DecisionID:        "decision.risk-unknown",
+		RiskType:          "runtime_anomaly",
+		AdapterID:         testAdapterID,
+		CapabilityID:      testCapabilityID,
+		CapabilityGrantID: testCapabilityGrantID,
+		Mode:              ActionModeRequired,
+		TargetScope:       "source",
+		TargetKey:         "source-risk",
+		Reason:            "unknown risk should observe only",
+		AuditID:           "audit.risk-unknown",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Results) != 0 || len(result.Plan.Actions) != 0 || executor.calls != 0 {
+		t.Fatalf("expected no runtime action for unknown observe, result=%#v calls=%d", result, executor.calls)
+	}
+	decisions, err := store.RuntimeDecisions(ctx, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(decisions) != 1 || decisions[0].Status != "no_action" {
+		t.Fatalf("expected no_action decision journal, got %#v", decisions)
+	}
+}
+
 func TestManagerDeniesNewActionWhenLocalAuditWriteFails(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC)
@@ -1031,6 +1110,11 @@ func testRuntimeBundle() corebundle.RuntimeBundle {
 				Label:       "deny temporarily source",
 				CanonicalID: "runtime_action.deny_temporarily_source",
 			}},
+			RiskRecipe: "runtime_anomaly.standard",
+			RiskBehavior: []corerisk.PolicyRiskBehavior{
+				{RiskType: "risk_type.runtime_anomaly", Tier: "risk_tier.critical", Effect: "effect.deny_temporarily"},
+				{RiskType: "risk_type.runtime_anomaly", Tier: "risk_tier.unknown", Effect: "effect.observe"},
+			},
 			CapabilityGrants: []corebundle.CapabilityGrant{
 				{
 					ID:                  testCapabilityGrantID,
@@ -1209,6 +1293,19 @@ type auditFailStore struct {
 
 func (s auditFailStore) AppendAudit(context.Context, actionstate.AuditRecord) error {
 	return fmt.Errorf("audit spool unavailable")
+}
+
+type recordingExecutor struct {
+	calls int
+}
+
+func (e *recordingExecutor) Execute(context.Context, actionstate.RuntimeActionLease, []byte) error {
+	e.calls++
+	return nil
+}
+
+func (e *recordingExecutor) Cleanup(context.Context, actionstate.RuntimeActionLease) error {
+	return nil
 }
 
 type countingExecutor struct {

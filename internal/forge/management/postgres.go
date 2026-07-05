@@ -217,6 +217,62 @@ func postgresMigrations() []postgresMigration {
 				`ALTER TABLE kliq_identities ADD COLUMN IF NOT EXISTS credential_expires_at TIMESTAMPTZ`,
 			},
 		},
+		{
+			Version: 3,
+			Name:    "reality_graph_seed_tables",
+			Statements: []string{
+				`CREATE TABLE IF NOT EXISTS reality_nodes (
+			node_id TEXT PRIMARY KEY,
+			node_type TEXT NOT NULL,
+			scope TEXT NOT NULL DEFAULT '',
+			environment TEXT NOT NULL DEFAULT '',
+			stage TEXT NOT NULL DEFAULT '',
+			source_commit TEXT NOT NULL DEFAULT '',
+			payload_sha256 TEXT NOT NULL,
+			node_json JSONB NOT NULL,
+			created_at TIMESTAMPTZ NOT NULL
+		)`,
+				`CREATE TABLE IF NOT EXISTS reality_edges (
+			edge_id TEXT PRIMARY KEY,
+			from_node_id TEXT NOT NULL,
+			to_node_id TEXT NOT NULL,
+			edge_type TEXT NOT NULL,
+			scope TEXT NOT NULL DEFAULT '',
+			source_commit TEXT NOT NULL DEFAULT '',
+			payload_sha256 TEXT NOT NULL,
+			edge_json JSONB NOT NULL,
+			created_at TIMESTAMPTZ NOT NULL
+		)`,
+				`CREATE INDEX IF NOT EXISTS reality_edges_from_idx ON reality_edges(from_node_id)`,
+				`CREATE INDEX IF NOT EXISTS reality_edges_to_idx ON reality_edges(to_node_id)`,
+				`CREATE TABLE IF NOT EXISTS reality_observations (
+			observation_id TEXT PRIMARY KEY,
+			node_id TEXT NOT NULL DEFAULT '',
+			edge_id TEXT NOT NULL DEFAULT '',
+			observation_type TEXT NOT NULL,
+			payload_sha256 TEXT NOT NULL,
+			observation_json JSONB NOT NULL,
+			observed_at TIMESTAMPTZ NOT NULL,
+			created_at TIMESTAMPTZ NOT NULL
+		)`,
+				`CREATE TABLE IF NOT EXISTS reality_snapshots (
+			snapshot_id TEXT PRIMARY KEY,
+			scope TEXT NOT NULL,
+			source_commit TEXT NOT NULL DEFAULT '',
+			payload_sha256 TEXT NOT NULL,
+			snapshot_json JSONB NOT NULL,
+			created_at TIMESTAMPTZ NOT NULL
+		)`,
+				`CREATE TABLE IF NOT EXISTS reality_findings (
+			finding_id TEXT PRIMARY KEY,
+			scope TEXT NOT NULL,
+			severity TEXT NOT NULL,
+			payload_sha256 TEXT NOT NULL,
+			finding_json JSONB NOT NULL,
+			created_at TIMESTAMPTZ NOT NULL
+		)`,
+			},
+		},
 	}
 }
 

@@ -277,6 +277,7 @@ func executeAction(args []string) {
 	fs.StringVar(&adapterTransport.ClientCertPath, "adapter-client-cert", "", "adapter mTLS client certificate")
 	fs.StringVar(&adapterTransport.ClientKeyPath, "adapter-client-key", "", "adapter mTLS client private key")
 	fs.StringVar(&adapterTransport.ServerName, "adapter-server-name", "", "expected adapter TLS server name")
+	fs.StringVar(&adapterTransport.ServerCertificateSHA256, "adapter-server-cert-sha256", "", "expected adapter leaf certificate SHA-256 pin")
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
@@ -344,6 +345,7 @@ func reconcile(args []string) {
 	fs.StringVar(&adapterTransport.ClientCertPath, "adapter-client-cert", "", "adapter mTLS client certificate")
 	fs.StringVar(&adapterTransport.ClientKeyPath, "adapter-client-key", "", "adapter mTLS client private key")
 	fs.StringVar(&adapterTransport.ServerName, "adapter-server-name", "", "expected adapter TLS server name")
+	fs.StringVar(&adapterTransport.ServerCertificateSHA256, "adapter-server-cert-sha256", "", "expected adapter leaf certificate SHA-256 pin")
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
