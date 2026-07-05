@@ -6,7 +6,11 @@ package bundle
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"net/http"
@@ -158,32 +162,125 @@ func (s *ManagedAssignmentSource) verifyAssignment(ctx context.Context, envelope
 }
 
 func (s *ManagedAssignmentSource) verifyAssignedArtifacts(ctx context.Context, assignment domain.KLIQAssignment) error {
+	artifactVerifier := s.Verifier
+	artifactTrustKeyID := ""
 	for _, artifact := range assignment.Artifacts {
-		if !domain.SupportedAssignmentArtifactType(artifact.ArtifactType) {
-			return fmt.Errorf("assignment %q contains unsupported artifact type %q", assignment.AssignmentID, artifact.ArtifactType)
+		if artifact.ArtifactType != "trust_bundle" {
+			continue
 		}
-		var envelope signing.SignedEnvelope
-		if err := json.Unmarshal(artifact.Envelope, &envelope); err != nil {
-			return fmt.Errorf("assignment %q artifact %q is not a signed envelope: %w", assignment.AssignmentID, artifact.ArtifactID, err)
-		}
-		if envelope.Kind != "SignedEnvelope" {
-			return fmt.Errorf("assignment %q artifact %q is not a signed envelope", assignment.AssignmentID, artifact.ArtifactID)
-		}
-		result, err := s.Verifier.Verify(ctx, envelope)
+		envelope, result, err := s.verifyAssignedArtifactEnvelope(ctx, assignment, artifact, s.Verifier)
 		if err != nil {
 			return err
 		}
-		if !result.Valid {
-			return fmt.Errorf("assignment %q artifact %q signature invalid: %s", assignment.AssignmentID, artifact.ArtifactID, result.Error)
+		var bundle domain.TrustBundle
+		if err := json.Unmarshal(envelope.Payload, &bundle); err != nil {
+			return fmt.Errorf("assignment %q artifact %q invalid trust bundle payload: %w", assignment.AssignmentID, artifact.ArtifactID, err)
 		}
-		if envelope.SourceCommit != "" && assignment.SourceCommit != "" && envelope.SourceCommit != assignment.SourceCommit {
-			return fmt.Errorf("assignment %q artifact %q source_commit mismatch", assignment.AssignmentID, artifact.ArtifactID)
+		if bundle.Purpose != "artifact_verification" {
+			continue
 		}
-		if err := validateAssignedArtifactPayloadType(artifact.ArtifactType, envelope.Payload); err != nil {
-			return fmt.Errorf("assignment %q artifact %q invalid payload: %w", assignment.AssignmentID, artifact.ArtifactID, err)
+		if artifactTrustKeyID != "" {
+			return fmt.Errorf("assignment %q contains more than one artifact_verification trust bundle", assignment.AssignmentID)
+		}
+		verifier, err := artifactVerifierFromTrustBundle(bundle, result.VerifiedAt)
+		if err != nil {
+			return fmt.Errorf("assignment %q artifact %q invalid artifact verification trust bundle: %w", assignment.AssignmentID, artifact.ArtifactID, err)
+		}
+		artifactVerifier = verifier
+		artifactTrustKeyID = bundle.KeyID
+	}
+	for _, artifact := range assignment.Artifacts {
+		if artifact.ArtifactType == "trust_bundle" {
+			continue
+		}
+		if _, _, err := s.verifyAssignedArtifactEnvelope(ctx, assignment, artifact, artifactVerifier); err != nil {
+			if artifactTrustKeyID != "" {
+				return fmt.Errorf("%w; expected artifact_verification key %q", err, artifactTrustKeyID)
+			}
+			return err
 		}
 	}
 	return nil
+}
+
+func (s *ManagedAssignmentSource) verifyAssignedArtifactEnvelope(ctx context.Context, assignment domain.KLIQAssignment, artifact domain.KLIQAssignedArtifact, verifier signing.Verifier) (signing.SignedEnvelope, signing.VerificationResult, error) {
+	if !domain.SupportedAssignmentArtifactType(artifact.ArtifactType) {
+		return signing.SignedEnvelope{}, signing.VerificationResult{}, fmt.Errorf("assignment %q contains unsupported artifact type %q", assignment.AssignmentID, artifact.ArtifactType)
+	}
+	var envelope signing.SignedEnvelope
+	if err := json.Unmarshal(artifact.Envelope, &envelope); err != nil {
+		return signing.SignedEnvelope{}, signing.VerificationResult{}, fmt.Errorf("assignment %q artifact %q is not a signed envelope: %w", assignment.AssignmentID, artifact.ArtifactID, err)
+	}
+	if envelope.Kind != "SignedEnvelope" {
+		return signing.SignedEnvelope{}, signing.VerificationResult{}, fmt.Errorf("assignment %q artifact %q is not a signed envelope", assignment.AssignmentID, artifact.ArtifactID)
+	}
+	result, err := verifier.Verify(ctx, envelope)
+	if err != nil {
+		return signing.SignedEnvelope{}, signing.VerificationResult{}, err
+	}
+	if !result.Valid {
+		return signing.SignedEnvelope{}, signing.VerificationResult{}, fmt.Errorf("assignment %q artifact %q signature invalid: %s", assignment.AssignmentID, artifact.ArtifactID, result.Error)
+	}
+	if envelope.SourceCommit != "" && assignment.SourceCommit != "" && envelope.SourceCommit != assignment.SourceCommit {
+		return signing.SignedEnvelope{}, signing.VerificationResult{}, fmt.Errorf("assignment %q artifact %q source_commit mismatch", assignment.AssignmentID, artifact.ArtifactID)
+	}
+	if err := validateAssignedArtifactPayloadType(artifact.ArtifactType, envelope.Payload); err != nil {
+		return signing.SignedEnvelope{}, signing.VerificationResult{}, fmt.Errorf("assignment %q artifact %q invalid payload: %w", assignment.AssignmentID, artifact.ArtifactID, err)
+	}
+	return envelope, result, nil
+}
+
+func artifactVerifierFromTrustBundle(bundle domain.TrustBundle, verifiedAt time.Time) (signing.Verifier, error) {
+	if bundle.KeyID == "" || bundle.PublicKey == "" {
+		return nil, fmt.Errorf("trust bundle requires key_id and public_key")
+	}
+	if bundle.Purpose != "artifact_verification" {
+		return nil, fmt.Errorf("trust bundle %q has purpose %q, expected artifact_verification", bundle.KeyID, bundle.Purpose)
+	}
+	switch bundle.Status {
+	case "active", "previous":
+	default:
+		return nil, fmt.Errorf("trust bundle %q is %q", bundle.KeyID, bundle.Status)
+	}
+	if !bundle.ExpiresAt.IsZero() && !bundle.ExpiresAt.After(verifiedAt.UTC()) {
+		return nil, fmt.Errorf("trust bundle %q is expired", bundle.KeyID)
+	}
+	publicKey, err := decodeTrustBundlePublicKey(bundle.PublicKey)
+	if err != nil {
+		return nil, err
+	}
+	verifier, err := signing.NewEd25519Verifier(bundle.KeyID, publicKey)
+	if err != nil {
+		return nil, err
+	}
+	verifier.Now = func() time.Time { return verifiedAt.UTC() }
+	return verifier, nil
+}
+
+func decodeTrustBundlePublicKey(value string) ([]byte, error) {
+	value = strings.TrimSpace(value)
+	if block, _ := pem.Decode([]byte(value)); block != nil {
+		publicKey, err := x509.ParsePKIXPublicKey(block.Bytes)
+		if err != nil {
+			return nil, err
+		}
+		edKey, ok := publicKey.(ed25519.PublicKey)
+		if !ok {
+			return nil, fmt.Errorf("trust bundle public key is not Ed25519")
+		}
+		return []byte(edKey), nil
+	}
+	decoded, err := base64.StdEncoding.DecodeString(value)
+	if err != nil {
+		decoded, err = base64.RawStdEncoding.DecodeString(value)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("trust bundle public_key must be PEM or base64 Ed25519 key")
+	}
+	if len(decoded) != ed25519.PublicKeySize {
+		return nil, fmt.Errorf("trust bundle public_key has invalid Ed25519 length")
+	}
+	return decoded, nil
 }
 
 func validateAssignedArtifactPayloadType(artifactType string, payload []byte) error {

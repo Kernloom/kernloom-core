@@ -182,6 +182,12 @@ func loadManagedBundle(args []string) {
 	trustBundlePath := fs.String("trust-bundle", defaultTrustBundlePath, "path to public trust bundle")
 	devAllowPrivateTrustKey := fs.Bool("dev-allow-private-trust-key", false, "allow dev-local key files containing private material; never use in production")
 	devInsecureForgeTransport := fs.Bool("dev-insecure-forge-transport", false, "allow plaintext http Forge transport; dev/smoke only")
+	forgeTransport := forgeTransportOptions{}
+	fs.StringVar(&forgeTransport.CAPath, "forge-ca", "", "Forge HTTPS CA bundle")
+	fs.StringVar(&forgeTransport.ClientCertPath, "forge-client-cert", "", "Forge mTLS client certificate")
+	fs.StringVar(&forgeTransport.ClientKeyPath, "forge-client-key", "", "Forge mTLS client private key")
+	fs.StringVar(&forgeTransport.ServerName, "forge-server-name", "", "expected Forge TLS server name")
+	fs.StringVar(&forgeTransport.ServerCertificateSHA256, "forge-cert-sha256", "", "expected Forge leaf certificate SHA-256 pin")
 	statePath := fs.String("state", defaultStatePath, "path to KLIQ local SQLite state")
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -225,6 +231,11 @@ func loadManagedBundle(args []string) {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
+	httpClient, err := forgeHTTPClient(forgeTransport)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
 	manager, closeStore := managerOrExit(*statePath, *trustBundlePath, *devAllowPrivateTrustKey, nil)
 	defer closeStore()
 	record, err := manager.LoadManagedBundle(context.Background(), &kliqbundle.ManagedAssignmentSource{
@@ -237,6 +248,7 @@ func loadManagedBundle(args []string) {
 		TrustKeyID:  *trustKeyID,
 		TrustBundle: manager.TrustBundle,
 		Verifier:    manager.Verifier,
+		HTTPClient:  httpClient,
 	})
 	if err != nil {
 		logError("kliq_load_managed_bundle_failed", "kliq_id", *kliqID, "environment", *environment, "stage", *stage, "error", err.Error())
@@ -492,11 +504,14 @@ func auditPendingCmd(args []string) {
 }
 
 type auditExportDocument struct {
-	Kind           string      `json:"kind"`
-	ExportedAt     string      `json:"exported_at"`
-	Redacted       bool        `json:"redacted"`
-	PendingRecords int         `json:"pending_records"`
-	Records        interface{} `json:"records"`
+	Kind             string      `json:"kind"`
+	ExportedAt       string      `json:"exported_at"`
+	Mode             string      `json:"mode"`
+	ProductionUpload bool        `json:"production_upload"`
+	Notice           string      `json:"notice,omitempty"`
+	Redacted         bool        `json:"redacted"`
+	PendingRecords   int         `json:"pending_records"`
+	Records          interface{} `json:"records"`
 }
 
 func auditExportCmd(args []string) {
@@ -516,11 +531,14 @@ func auditExportCmd(args []string) {
 		os.Exit(1)
 	}
 	doc := auditExportDocument{
-		Kind:           "KLIQAuditSpoolExport",
-		ExportedAt:     time.Now().UTC().Format(time.RFC3339Nano),
-		Redacted:       !*includePayload,
-		PendingRecords: len(records),
-		Records:        auditRecordViews(records),
+		Kind:             "KLIQAuditSpoolExport",
+		ExportedAt:       time.Now().UTC().Format(time.RFC3339Nano),
+		Mode:             "local_offline",
+		ProductionUpload: false,
+		Notice:           "Local audit spool export is an offline evidence export; managed production upload is performed by `kliq run --mode managed`.",
+		Redacted:         !*includePayload,
+		PendingRecords:   len(records),
+		Records:          auditRecordViews(records),
 	}
 	if *includePayload {
 		doc.Records = records

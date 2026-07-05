@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -517,11 +518,11 @@ func (s *PostgresStore) RevokeKLIQ(ctx context.Context, kliqID, reason string, r
 }
 
 func (s *PostgresStore) SaveTrustBundle(ctx context.Context, bundle domain.TrustBundle) error {
-	if bundle.KeyID == "" {
-		return fmt.Errorf("trust bundle requires key_id")
-	}
 	if bundle.Status == "" {
 		bundle.Status = "active"
+	}
+	if err := validateNewTrustBundle(bundle); err != nil {
+		return err
 	}
 	existing, err := s.TrustBundle(ctx, bundle.KeyID)
 	if err == nil {
@@ -548,6 +549,82 @@ func (s *PostgresStore) SaveTrustBundle(ctx context.Context, bundle domain.Trust
 			trust_bundle_json = EXCLUDED.trust_bundle_json`,
 		bundle.KeyID, bundle.PublicKey, bundle.Purpose, bundle.Status, bundle.ExpiresAt, bundle.Issuer, data)
 	return err
+}
+
+func (s *PostgresStore) RotateTrustBundle(ctx context.Context, currentKeyID string, next domain.TrustBundle, reason string, rotatedAt time.Time) error {
+	currentKeyID = strings.TrimSpace(currentKeyID)
+	if currentKeyID == "" {
+		return fmt.Errorf("current trust bundle key_id is required")
+	}
+	current, err := s.TrustBundle(ctx, currentKeyID)
+	if err != nil {
+		return err
+	}
+	if current.Status != "active" {
+		return fmt.Errorf("trust bundle %q must be active to rotate", currentKeyID)
+	}
+	if next.Status == "" {
+		next.Status = "active"
+	}
+	if err := validateNewTrustBundle(next); err != nil {
+		return err
+	}
+	if next.KeyID == currentKeyID {
+		return fmt.Errorf("rotation requires a new trust bundle key_id")
+	}
+	if current.Purpose != "" && next.Purpose != current.Purpose {
+		return fmt.Errorf("trust bundle rotation purpose mismatch: %q to %q", current.Purpose, next.Purpose)
+	}
+	if next.Status != "active" {
+		return fmt.Errorf("new trust bundle %q must be active", next.KeyID)
+	}
+	if _, err := s.TrustBundle(ctx, next.KeyID); err == nil {
+		return fmt.Errorf("trust bundle %q already exists", next.KeyID)
+	} else if err != nil && !errors.Is(err, ErrNotFound) {
+		return err
+	}
+	if rotatedAt.IsZero() {
+		rotatedAt = time.Now().UTC()
+	}
+	current.Status = "previous"
+	currentJSON, err := json.Marshal(current)
+	if err != nil {
+		return err
+	}
+	nextJSON, err := json.Marshal(next)
+	if err != nil {
+		return err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `UPDATE trust_bundles
+		SET status = $1, trust_bundle_json = $2
+		WHERE key_id = $3 AND status = 'active'`,
+		current.Status, currentJSON, currentKeyID)
+	if err != nil {
+		return err
+	}
+	if rows, _ := result.RowsAffected(); rows == 0 {
+		return fmt.Errorf("trust bundle %q must be active to rotate", currentKeyID)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO trust_bundles
+		(key_id, public_key, purpose, status, expires_at, issuer, trust_bundle_json)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		next.KeyID, next.PublicKey, next.Purpose, next.Status, next.ExpiresAt, next.Issuer, nextJSON); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return s.SaveAuditEvent(ctx, auditEvent(ctx, "trust_bundle_rotated", "trust_key", currentKeyID, "", "", "", "", rotatedAt.UTC(), map[string]any{
+		"previous_key_id": currentKeyID,
+		"active_key_id":   next.KeyID,
+		"purpose":         next.Purpose,
+		"reason":          reason,
+	}))
 }
 
 func (s *PostgresStore) TrustBundle(ctx context.Context, keyID string) (domain.TrustBundle, error) {

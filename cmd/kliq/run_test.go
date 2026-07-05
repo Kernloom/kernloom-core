@@ -18,8 +18,11 @@ import (
 	coreartifact "github.com/kernloom/kernloom-core/internal/core/artifact"
 	corebundle "github.com/kernloom/kernloom-core/internal/core/bundle"
 	"github.com/kernloom/kernloom-core/internal/core/domain"
+	corerisk "github.com/kernloom/kernloom-core/internal/core/risk"
 	"github.com/kernloom/kernloom-core/internal/core/signing"
 	"github.com/kernloom/kernloom-core/internal/kliq/actionstate"
+	"github.com/kernloom/kernloom-core/internal/kliq/baseline"
+	"github.com/kernloom/kernloom-core/internal/kliq/signals/projector"
 )
 
 func TestKLIQRunManagedOncePollsAssignmentAndReports(t *testing.T) {
@@ -229,6 +232,62 @@ func TestRuntimeDecisionSourceFromFileReadsLocalRuntimeEvent(t *testing.T) {
 	}
 }
 
+func TestKLIQDaemonIngestsKLShieldSignalIntoRiskCache(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now().UTC()
+	statePath := filepath.Join(t.TempDir(), "state.db")
+	store, err := actionstate.OpenSQLite(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	version := baseline.VersionRef{
+		VersionID:  "baseline_version.active",
+		View:       baseline.ViewEntity,
+		Entity:     "klshield:edge-prod",
+		CreatedAt:  now.Add(-time.Hour),
+		PromotedAt: now.Add(-time.Hour),
+	}
+	if err := store.SaveBaselineVersion(ctx, version, []baseline.Stats{{
+		VersionID:   version.VersionID,
+		Key:         baseline.Key{View: baseline.ViewEntity, Entity: "klshield:edge-prod"},
+		Metric:      "active_runtime_actions",
+		Center:      1,
+		Spread:      1,
+		SampleCount: 5,
+		FrozenAt:    now.Add(-time.Hour),
+	}}, true); err != nil {
+		t.Fatal(err)
+	}
+	daemon := &runDaemon{
+		opts:       runOptions{BaselineRiskRecipe: "runtime_anomaly.standard", BaselineMinSamples: 5},
+		store:      store,
+		credential: actionstate.KLIQCredential{KLIQID: "kliq.test", Scope: "edge-prod"},
+		signalReaders: map[string]AdapterSignalReader{
+			projector.KLShieldAdapterID: fakeAdapterSignalReader{signals: []baseline.AdapterSignal{{
+				AdapterID:  projector.KLShieldAdapterID,
+				SignalID:   "signal.1",
+				SignalType: "klshield.runtime_action_counts",
+				Labels:     map[string]string{"entity": "edge-prod"},
+				Metrics:    map[string]float64{"active_runtime_actions": 10},
+				ObservedAt: now,
+			}}},
+		},
+		baselineSamples: map[string][]baseline.Sample{},
+		now:             func() time.Time { return now },
+	}
+	if err := daemon.processAdapterSignals(ctx); err != nil {
+		t.Fatal(err)
+	}
+	riskContext, err := store.RiskContext(ctx, actionstate.RiskCacheKey{RiskType: "runtime_anomaly", Scope: corerisk.ScopeLocal}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if riskContext.Tier != corerisk.TierCritical || riskContext.Source != "baseline.local" {
+		t.Fatalf("expected critical baseline risk context, got %#v", riskContext)
+	}
+}
+
 func TestKLIQRunFlushesAuditSpoolToForge(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 4, 12, 0, 0, 0, time.UTC)
@@ -309,6 +368,53 @@ func TestKLIQRunFlushesAuditSpoolToForge(t *testing.T) {
 	if len(pending) != 0 {
 		t.Fatalf("expected uploaded audit to leave pending set, got %#v", pending)
 	}
+}
+
+func TestKLIQRunStandaloneAuditSpoolRemainsLocalOffline(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 4, 12, 0, 0, 0, time.UTC)
+	statePath := filepath.Join(t.TempDir(), "state.db")
+	store, err := actionstate.OpenSQLite(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AppendAudit(ctx, actionstate.AuditRecord{
+		ID:              "audit_spool.local",
+		RuntimeActionID: "runtime_action.local",
+		Status:          "pending_upload",
+		Payload:         `{"event":"local"}`,
+		CreatedAt:       now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	daemon := &runDaemon{
+		opts:  runOptions{Mode: kliqRunModeStandalone},
+		store: store,
+		now:   func() time.Time { return now },
+	}
+	if err := daemon.flushAuditSpool(ctx); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := store.PendingAudits(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 1 {
+		t.Fatalf("expected standalone audit spool to remain local, got %#v", pending)
+	}
+	if len(daemon.findings) != 1 || !strings.Contains(daemon.findings[0], "local/offline") {
+		t.Fatalf("expected standalone audit export finding, got %#v", daemon.findings)
+	}
+}
+
+type fakeAdapterSignalReader struct {
+	signals []baseline.AdapterSignal
+	err     error
+}
+
+func (r fakeAdapterSignalReader) ReadSignals(context.Context, string) ([]baseline.AdapterSignal, error) {
+	return append([]baseline.AdapterSignal(nil), r.signals...), r.err
 }
 
 func runTestSigner(t *testing.T, keyPath string, now time.Time) *signing.DevLocalSigner {

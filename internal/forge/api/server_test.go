@@ -1119,6 +1119,48 @@ func TestForgeAPIMTLSSPIFFEPeerCertificateAuthenticatesKLIQ(t *testing.T) {
 	}
 }
 
+func TestRotateTrustBundleEndpointPromotesNextKey(t *testing.T) {
+	store := management.NewMemoryStore()
+	now := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
+	current := domain.TrustBundle{
+		KeyID:     "assignment-key-1",
+		PublicKey: "public-key-a",
+		Purpose:   "assignment_verification",
+		Status:    "active",
+		ExpiresAt: now.Add(time.Hour),
+		Issuer:    "forge",
+	}
+	if err := store.SaveTrustBundle(t.Context(), current); err != nil {
+		t.Fatal(err)
+	}
+	server := Server{
+		Authenticator: authn.DevTokenVerifier{},
+		Authorizer:    authz.Authorizer{},
+		Management:    store,
+	}
+	body := bytes.NewBufferString(`{"next":{"key_id":"assignment-key-2","public_key":"public-key-b","purpose":"assignment_verification","status":"active","expires_at":"2026-07-05T14:00:00Z","issuer":"forge"},"reason":"scheduled"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/kliq/trust-bundles/assignment-key-1/rotate", body)
+	req.Header.Set("Authorization", "Bearer dev:ops:operator:acme:prod:prod")
+	rec := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected accepted, got %d: %s", rec.Code, rec.Body.String())
+	}
+	previous, err := store.TrustBundle(t.Context(), current.KeyID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	active, err := store.TrustBundle(t.Context(), "assignment-key-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if previous.Status != "previous" || active.Status != "active" {
+		t.Fatalf("expected previous/active rotation states, got previous=%#v active=%#v", previous, active)
+	}
+}
+
 func testRegistration(kliqID, nodeID string) domain.KLIQRegistration {
 	return domain.KLIQRegistration{
 		RegistrationID: "registration." + kliqID,

@@ -254,6 +254,92 @@ func TestMemoryStoreRejectsSilentTrustBundleExpiryExtension(t *testing.T) {
 	}
 }
 
+func TestMemoryStoreRotatesTrustBundleActivePreviousAndAudits(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := WithAuditActor(context.Background(), "security-owner")
+	now := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+	current := domain.TrustBundle{
+		KeyID:     "assignment-key-1",
+		PublicKey: "public-key-a",
+		Purpose:   "assignment_verification",
+		Status:    "active",
+		ExpiresAt: now.Add(time.Hour),
+		Issuer:    "forge",
+	}
+	next := domain.TrustBundle{
+		KeyID:     "assignment-key-2",
+		PublicKey: "public-key-b",
+		Purpose:   "assignment_verification",
+		Status:    "active",
+		ExpiresAt: now.Add(2 * time.Hour),
+		Issuer:    "forge",
+	}
+	if err := store.SaveTrustBundle(ctx, current); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RotateTrustBundle(ctx, current.KeyID, next, "scheduled rotation", now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	previous, err := store.TrustBundle(ctx, current.KeyID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	active, err := store.TrustBundle(ctx, next.KeyID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if previous.Status != "previous" || active.Status != "active" {
+		t.Fatalf("expected previous/active rotation state, got previous=%#v active=%#v", previous, active)
+	}
+	events, err := store.AuditEvents(ctx, "trust_key", current.KeyID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].EventType != "trust_bundle_rotated" || events[0].Actor != "security-owner" {
+		t.Fatalf("expected trust bundle rotation audit event, got %#v", events)
+	}
+}
+
+func TestMemoryStoreRejectsTrustBundleRotationPurposeChangeAndRevokedCurrent(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := context.Background()
+	now := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+	current := domain.TrustBundle{
+		KeyID:     "assignment-key-1",
+		PublicKey: "public-key-a",
+		Purpose:   "assignment_verification",
+		Status:    "active",
+		ExpiresAt: now.Add(time.Hour),
+		Issuer:    "forge",
+	}
+	if err := store.SaveTrustBundle(ctx, current); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RotateTrustBundle(ctx, current.KeyID, domain.TrustBundle{
+		KeyID:     "artifact-key-1",
+		PublicKey: "public-key-b",
+		Purpose:   "artifact_verification",
+		Status:    "active",
+		ExpiresAt: now.Add(time.Hour),
+		Issuer:    "forge",
+	}, "bad rotation", now); err == nil {
+		t.Fatal("expected purpose-changing rotation to be rejected")
+	}
+	if err := store.RevokeTrustBundle(ctx, current.KeyID, "compromised", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RotateTrustBundle(ctx, current.KeyID, domain.TrustBundle{
+		KeyID:     "assignment-key-2",
+		PublicKey: "public-key-c",
+		Purpose:   "assignment_verification",
+		Status:    "active",
+		ExpiresAt: now.Add(time.Hour),
+		Issuer:    "forge",
+	}, "too late", now); err == nil {
+		t.Fatal("expected revoked trust bundle rotation to be rejected")
+	}
+}
+
 func TestMemoryStoreLatestAssignmentDoesNotFallbackAfterLatestRevoked(t *testing.T) {
 	store := NewMemoryStore()
 	ctx := context.Background()

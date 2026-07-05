@@ -93,6 +93,11 @@ type revocationRequest struct {
 	Reason string `json:"reason"`
 }
 
+type trustBundleRotationRequest struct {
+	Next   domain.TrustBundle `json:"next"`
+	Reason string             `json:"reason,omitempty"`
+}
+
 func (s Server) approvePolicyBuildManifest(w http.ResponseWriter, r *http.Request, principal authn.Principal) {
 	if s.Artifacts == nil || s.ManagementSign == nil {
 		writeError(w, http.StatusInternalServerError, "build_approval_not_configured")
@@ -1003,6 +1008,34 @@ func (s Server) revokeKLIQRegistration(w http.ResponseWriter, r *http.Request, p
 		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "revoked"})
+}
+
+func (s Server) rotateTrustBundle(w http.ResponseWriter, r *http.Request, principal authn.Principal) {
+	if s.Management == nil {
+		writeError(w, http.StatusInternalServerError, "kliq_management_store_not_configured")
+		return
+	}
+	if err := s.Authorizer.Authorize(principal, authz.Request{
+		Action:       "kliq.trust_bundle.rotate",
+		AllowedRoles: authz.KLIQManageRoles(),
+	}); err != nil {
+		writeError(w, http.StatusForbidden, "forbidden")
+		return
+	}
+	var req trustBundleRotationRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_json")
+		return
+	}
+	if err := s.Management.RotateTrustBundle(r.Context(), strings.TrimSpace(r.PathValue("key_id")), req.Next, strings.TrimSpace(req.Reason), time.Now().UTC()); err != nil {
+		if errors.Is(err, management.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "trust_bundle_not_found")
+			return
+		}
+		writeError(w, http.StatusBadRequest, "trust_bundle_rotate_failed")
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "rotated"})
 }
 
 func (s Server) revokeTrustBundle(w http.ResponseWriter, r *http.Request, principal authn.Principal) {

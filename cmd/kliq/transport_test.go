@@ -4,6 +4,13 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/pem"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -34,6 +41,51 @@ func TestAdapterDialOptionsRejectsPlaintextWithoutDevFlag(t *testing.T) {
 	}
 	if len(opts) == 0 {
 		t.Fatal("expected grpc dial options")
+	}
+}
+
+func TestForgeHTTPClientUsesCAAndCertificatePin(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer server.Close()
+	cert := server.Certificate()
+	caPath := filepath.Join(t.TempDir(), "forge-ca.pem")
+	if err := os.WriteFile(caPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(cert.Raw)
+	client, err := forgeHTTPClient(forgeTransportOptions{
+		CAPath:                  caPath,
+		ServerCertificateSHA256: "sha256:" + hex.EncodeToString(sum[:]),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := client.Get(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+
+	badClient, err := forgeHTTPClient(forgeTransportOptions{
+		CAPath:                  caPath,
+		ServerCertificateSHA256: "sha256:" + strings.Repeat("0", 64),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err = badClient.Get(server.URL)
+	if err == nil {
+		_ = resp.Body.Close()
+		t.Fatal("expected forge certificate pin mismatch")
+	}
+}
+
+func TestForgeHTTPClientRequiresClientCertKeyPair(t *testing.T) {
+	_, err := forgeHTTPClient(forgeTransportOptions{ClientCertPath: "client.pem"})
+	if err == nil || !strings.Contains(err.Error(), "both --forge-client-cert and --forge-client-key") {
+		t.Fatalf("expected mTLS key pair validation, got %v", err)
 	}
 }
 

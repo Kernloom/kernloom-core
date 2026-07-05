@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"fmt"
+	"net/http"
 	"net/url"
 	"os"
 	"strings"
@@ -25,6 +26,14 @@ type adapterTransportOptions struct {
 	ClientKeyPath               string
 	ServerName                  string
 	ServerCertificateSHA256     string
+}
+
+type forgeTransportOptions struct {
+	CAPath                  string
+	ClientCertPath          string
+	ClientKeyPath           string
+	ServerName              string
+	ServerCertificateSHA256 string
 }
 
 func validateSecureForgeURL(rawURL string, allowDevInsecure bool) error {
@@ -47,6 +56,61 @@ func validateSecureForgeURL(rawURL string, allowDevInsecure bool) error {
 	default:
 		return fmt.Errorf("forge url %q must use https", rawURL)
 	}
+}
+
+func forgeHTTPClient(opts forgeTransportOptions) (*http.Client, error) {
+	tlsConfig, err := forgeTLSConfig(opts)
+	if err != nil {
+		return nil, err
+	}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.TLSClientConfig = tlsConfig
+	return &http.Client{Transport: transport}, nil
+}
+
+func forgeTLSConfig(opts forgeTransportOptions) (*tls.Config, error) {
+	tlsConfig := &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		ServerName: strings.TrimSpace(opts.ServerName),
+	}
+	if caPath := strings.TrimSpace(opts.CAPath); caPath != "" {
+		caPEM, err := os.ReadFile(caPath)
+		if err != nil {
+			return nil, err
+		}
+		roots := x509.NewCertPool()
+		if !roots.AppendCertsFromPEM(caPEM) {
+			return nil, fmt.Errorf("forge ca %q does not contain a PEM certificate", caPath)
+		}
+		tlsConfig.RootCAs = roots
+	}
+	certPath := strings.TrimSpace(opts.ClientCertPath)
+	keyPath := strings.TrimSpace(opts.ClientKeyPath)
+	if (certPath == "") != (keyPath == "") {
+		return nil, fmt.Errorf("forge mTLS requires both --forge-client-cert and --forge-client-key")
+	}
+	if certPath != "" {
+		clientCert, err := tls.LoadX509KeyPair(certPath, keyPath)
+		if err != nil {
+			return nil, err
+		}
+		tlsConfig.Certificates = []tls.Certificate{clientCert}
+	}
+	if pin := strings.TrimSpace(opts.ServerCertificateSHA256); pin != "" {
+		expectedPin := normalizeCertificateSHA256Pin(pin)
+		tlsConfig.VerifyPeerCertificate = func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+			if len(rawCerts) == 0 {
+				return fmt.Errorf("forge tls pin requires peer certificate")
+			}
+			sum := sha256.Sum256(rawCerts[0])
+			got := "sha256:" + hex.EncodeToString(sum[:])
+			if got != expectedPin {
+				return fmt.Errorf("forge tls server certificate pin mismatch")
+			}
+			return nil
+		}
+	}
+	return tlsConfig, nil
 }
 
 func adapterDialOptions(opts adapterTransportOptions) ([]grpc.DialOption, error) {
@@ -75,17 +139,26 @@ func adapterDialOptions(opts adapterTransportOptions) ([]grpc.DialOption, error)
 		ServerName:   strings.TrimSpace(opts.ServerName),
 	}
 	if pin := strings.TrimSpace(opts.ServerCertificateSHA256); pin != "" {
+		expectedPin := normalizeCertificateSHA256Pin(pin)
 		tlsConfig.VerifyPeerCertificate = func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
 			if len(rawCerts) == 0 {
 				return fmt.Errorf("adapter tls pin requires peer certificate")
 			}
 			sum := sha256.Sum256(rawCerts[0])
 			got := "sha256:" + hex.EncodeToString(sum[:])
-			if got != pin {
+			if got != expectedPin {
 				return fmt.Errorf("adapter tls server certificate pin mismatch")
 			}
 			return nil
 		}
 	}
 	return []grpc.DialOption{grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig))}, nil
+}
+
+func normalizeCertificateSHA256Pin(pin string) string {
+	pin = strings.ToLower(strings.TrimSpace(pin))
+	if strings.HasPrefix(pin, "sha256:") {
+		return pin
+	}
+	return "sha256:" + pin
 }

@@ -48,6 +48,12 @@ func enroll(args []string) {
 	fs := flag.NewFlagSet("kliq enroll", flag.ExitOnError)
 	forgeURL := fs.String("forge", "", "Forge API base URL")
 	devInsecureForgeTransport := fs.Bool("dev-insecure-forge-transport", false, "allow plaintext http Forge transport; dev/smoke only")
+	forgeTransport := forgeTransportOptions{}
+	fs.StringVar(&forgeTransport.CAPath, "forge-ca", "", "Forge HTTPS CA bundle")
+	fs.StringVar(&forgeTransport.ClientCertPath, "forge-client-cert", "", "Forge mTLS client certificate")
+	fs.StringVar(&forgeTransport.ClientKeyPath, "forge-client-key", "", "Forge mTLS client private key")
+	fs.StringVar(&forgeTransport.ServerName, "forge-server-name", "", "expected Forge TLS server name")
+	fs.StringVar(&forgeTransport.ServerCertificateSHA256, "forge-cert-sha256", "", "expected Forge leaf certificate SHA-256 pin")
 	enrollmentToken := fs.String("enrollment-token", "", "single-use KLIQ enrollment token")
 	nodeID := fs.String("node-id", "", "local node id")
 	environment := fs.String("environment", "", "KLIQ environment")
@@ -72,7 +78,12 @@ func enroll(args []string) {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	response, err := requestEnrollment(context.Background(), *forgeURL, *devInsecureForgeTransport, enrollRequest{
+	httpClient, err := forgeHTTPClient(forgeTransport)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	response, err := requestEnrollment(context.Background(), httpClient, *forgeURL, *devInsecureForgeTransport, enrollRequest{
 		EnrollmentToken: *enrollmentToken,
 		NodeID:          *nodeID,
 		Environment:     *environment,
@@ -141,9 +152,12 @@ func enroll(args []string) {
 	fmt.Printf("  service_token_expires_at: %s\n", tokenExpiresAt.Format(time.RFC3339))
 }
 
-func requestEnrollment(ctx context.Context, forgeURL string, allowDevInsecureTransport bool, req enrollRequest) (enrollResponse, error) {
+func requestEnrollment(ctx context.Context, client *http.Client, forgeURL string, allowDevInsecureTransport bool, req enrollRequest) (enrollResponse, error) {
 	if err := validateSecureForgeURL(forgeURL, allowDevInsecureTransport); err != nil {
 		return enrollResponse{}, err
+	}
+	if client == nil {
+		client = http.DefaultClient
 	}
 	data, err := json.Marshal(req)
 	if err != nil {
@@ -155,7 +169,7 @@ func requestEnrollment(ctx context.Context, forgeURL string, allowDevInsecureTra
 		return enrollResponse{}, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(httpReq)
+	resp, err := client.Do(httpReq)
 	if err != nil {
 		return enrollResponse{}, err
 	}

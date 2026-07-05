@@ -10,6 +10,11 @@ Forge and KLIQ are separate binaries and modules inside this repository. They ar
 make build
 ```
 
+## Getting Started
+
+For the minimal managed Forge -> KLIQ -> KLShield smoke path, use
+[Managed KLIQ KLShield Getting Started](docs/user/getting-started-managed-klshield.md).
+
 ## Test
 
 ```sh

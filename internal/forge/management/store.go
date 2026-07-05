@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -70,6 +71,7 @@ type Store interface {
 	RevokeKLIQ(ctx context.Context, kliqID, reason string, revokedAt time.Time) error
 	SaveTrustBundle(ctx context.Context, bundle domain.TrustBundle) error
 	TrustBundle(ctx context.Context, keyID string) (domain.TrustBundle, error)
+	RotateTrustBundle(ctx context.Context, currentKeyID string, next domain.TrustBundle, reason string, rotatedAt time.Time) error
 	RevokeTrustBundle(ctx context.Context, keyID, reason string, revokedAt time.Time) error
 	NextAssignmentVersion(ctx context.Context, kliqID string) (int64, error)
 	SaveAssignment(ctx context.Context, kliqID string, version int64, envelope signing.SignedEnvelope) error
@@ -349,11 +351,11 @@ func (s *MemoryStore) RevokeKLIQ(ctx context.Context, kliqID, reason string, rev
 func (s *MemoryStore) SaveTrustBundle(_ context.Context, bundle domain.TrustBundle) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if bundle.KeyID == "" {
-		return fmt.Errorf("trust bundle requires key_id")
-	}
 	if bundle.Status == "" {
 		bundle.Status = "active"
+	}
+	if err := validateNewTrustBundle(bundle); err != nil {
+		return err
 	}
 	if existing, ok := s.trustBundles[bundle.KeyID]; ok {
 		if err := validateTrustBundleUpdate(existing, bundle); err != nil {
@@ -372,6 +374,60 @@ func (s *MemoryStore) TrustBundle(_ context.Context, keyID string) (domain.Trust
 		return domain.TrustBundle{}, ErrNotFound
 	}
 	return bundle, nil
+}
+
+func (s *MemoryStore) RotateTrustBundle(ctx context.Context, currentKeyID string, next domain.TrustBundle, reason string, rotatedAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	currentKeyID = strings.TrimSpace(currentKeyID)
+	if currentKeyID == "" {
+		return fmt.Errorf("current trust bundle key_id is required")
+	}
+	current, ok := s.trustBundles[currentKeyID]
+	if !ok {
+		return ErrNotFound
+	}
+	if current.Status != "active" {
+		return fmt.Errorf("trust bundle %q must be active to rotate", currentKeyID)
+	}
+	if next.Status == "" {
+		next.Status = "active"
+	}
+	if err := validateNewTrustBundle(next); err != nil {
+		return err
+	}
+	if next.KeyID == currentKeyID {
+		return fmt.Errorf("rotation requires a new trust bundle key_id")
+	}
+	if _, exists := s.trustBundles[next.KeyID]; exists {
+		return fmt.Errorf("trust bundle %q already exists", next.KeyID)
+	}
+	if current.Purpose != "" && next.Purpose != current.Purpose {
+		return fmt.Errorf("trust bundle rotation purpose mismatch: %q to %q", current.Purpose, next.Purpose)
+	}
+	if next.Status != "active" {
+		return fmt.Errorf("new trust bundle %q must be active", next.KeyID)
+	}
+	if rotatedAt.IsZero() {
+		rotatedAt = time.Now().UTC()
+	}
+	current.Status = "previous"
+	s.trustBundles[currentKeyID] = current
+	s.trustBundles[next.KeyID] = next
+	s.appendAuditLocked(domain.ManagementAuditEvent{
+		EventType:  "trust_bundle_rotated",
+		Actor:      auditActor(ctx),
+		TargetType: "trust_key",
+		TargetID:   currentKeyID,
+		Metadata: auditMetadata(ctx, map[string]any{
+			"previous_key_id": currentKeyID,
+			"active_key_id":   next.KeyID,
+			"purpose":         next.Purpose,
+			"reason":          reason,
+		}),
+		CreatedAt: rotatedAt.UTC(),
+	})
+	return nil
 }
 
 func (s *MemoryStore) RevokeTrustBundle(ctx context.Context, keyID, reason string, revokedAt time.Time) error {
@@ -575,6 +631,33 @@ func assignmentDigest(envelope signing.SignedEnvelope) string {
 	}
 	sum := sha256.Sum256(envelope.Payload)
 	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+func validateNewTrustBundle(bundle domain.TrustBundle) error {
+	if strings.TrimSpace(bundle.KeyID) == "" {
+		return fmt.Errorf("trust bundle requires key_id")
+	}
+	if strings.TrimSpace(bundle.PublicKey) == "" {
+		return fmt.Errorf("trust bundle %q requires public_key", bundle.KeyID)
+	}
+	if !validTrustBundlePurpose(bundle.Purpose) {
+		return fmt.Errorf("trust bundle %q has unsupported purpose %q", bundle.KeyID, bundle.Purpose)
+	}
+	switch strings.TrimSpace(bundle.Status) {
+	case "", "active", "previous", "revoked":
+		return nil
+	default:
+		return fmt.Errorf("trust bundle %q has unsupported status %q", bundle.KeyID, bundle.Status)
+	}
+}
+
+func validTrustBundlePurpose(purpose string) bool {
+	switch strings.TrimSpace(purpose) {
+	case "assignment_verification", "artifact_verification":
+		return true
+	default:
+		return false
+	}
 }
 
 func validateTrustBundleUpdate(existing, incoming domain.TrustBundle) error {

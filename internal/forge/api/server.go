@@ -52,6 +52,7 @@ func (s Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/kliq/assignments/{kliq_id}/latest", s.requireAuth(s.latestKLIQAssignment))
 	mux.HandleFunc("POST /v1/kliq/assignments/{kliq_id}/{version}/revoke", s.requireAuth(s.revokeKLIQAssignment))
 	mux.HandleFunc("POST /v1/kliq/registrations/{kliq_id}/revoke", s.requireAuth(s.revokeKLIQRegistration))
+	mux.HandleFunc("POST /v1/kliq/trust-bundles/{key_id}/rotate", s.requireAuth(s.rotateTrustBundle))
 	mux.HandleFunc("POST /v1/kliq/trust-bundles/{key_id}/revoke", s.requireAuth(s.revokeTrustBundle))
 	mux.HandleFunc("POST /v1/kliq/heartbeat", s.requireAuth(s.recordKLIQHeartbeat))
 	mux.HandleFunc("POST /v1/kliq/status-reports", s.requireAuth(s.recordKLIQStatusReport))

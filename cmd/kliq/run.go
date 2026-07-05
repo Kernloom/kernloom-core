@@ -22,9 +22,14 @@ import (
 
 	"github.com/kernloom/kernloom-core/internal/api/authn"
 	"github.com/kernloom/kernloom-core/internal/core/domain"
+	"github.com/kernloom/kernloom-core/internal/core/registry"
 	"github.com/kernloom/kernloom-core/internal/kliq/actionstate"
+	"github.com/kernloom/kernloom-core/internal/kliq/baseline"
 	kliqbundle "github.com/kernloom/kernloom-core/internal/kliq/bundle"
+	"github.com/kernloom/kernloom-core/internal/kliq/localrisk"
 	kliqruntime "github.com/kernloom/kernloom-core/internal/kliq/runtime"
+	"github.com/kernloom/kernloom-core/internal/kliq/signals/projector"
+	adapterv1 "github.com/kernloom/kernloom-protocol/sdk/go/adapter/v1"
 	"google.golang.org/grpc"
 )
 
@@ -59,13 +64,17 @@ type runOptions struct {
 	HeartbeatInterval         time.Duration
 	StatusInterval            time.Duration
 	DecisionInterval          time.Duration
+	SignalInterval            time.Duration
 	ReconcileInterval         time.Duration
 	AuditFlushInterval        time.Duration
 	DecisionSource            string
+	BaselineRiskRecipe        string
+	BaselineMinSamples        int
 	Once                      bool
 	Adapters                  []string
 	HTTPClient                *http.Client
 	DevInsecureForgeTransport bool
+	ForgeTransport            forgeTransportOptions
 	AdapterTransport          adapterTransportOptions
 }
 
@@ -77,12 +86,24 @@ type runDaemon struct {
 	httpClient           *http.Client
 	now                  func() time.Time
 	decisions            RuntimeDecisionSource
+	signalReaders        map[string]AdapterSignalReader
+	baselineSamples      map[string][]baseline.Sample
 	findings             []string
 	closeManagedAdapters func()
 }
 
 type RuntimeDecisionSource interface {
 	NextDecision(ctx context.Context) (kliqruntime.ExecuteRequest, bool, error)
+}
+
+type AdapterSignalReader interface {
+	ReadSignals(ctx context.Context, scope string) ([]baseline.AdapterSignal, error)
+}
+
+type grpcAdapterSignalReader struct {
+	adapterID string
+	client    adapterv1.AdapterServiceClient
+	now       func() time.Time
 }
 
 func run(args []string) {
@@ -100,12 +121,20 @@ func run(args []string) {
 	fs.DurationVar(&opts.HeartbeatInterval, "heartbeat-interval", 30*time.Second, "managed heartbeat interval")
 	fs.DurationVar(&opts.StatusInterval, "status-interval", time.Minute, "managed status report interval")
 	fs.DurationVar(&opts.DecisionInterval, "decision-interval", 5*time.Second, "runtime decision source polling interval")
+	fs.DurationVar(&opts.SignalInterval, "signal-interval", 30*time.Second, "adapter signal ingestion interval")
 	fs.DurationVar(&opts.ReconcileInterval, "reconcile-interval", 30*time.Second, "runtime action lease reconciliation interval")
 	fs.DurationVar(&opts.AuditFlushInterval, "audit-flush-interval", time.Minute, "audit spool flush interval")
 	fs.StringVar(&opts.DecisionSource, "decision-source", "", "optional local runtime decision source file; JSON object or array of local runtime events or debug execute-action requests")
+	fs.StringVar(&opts.BaselineRiskRecipe, "baseline-risk-recipe", "runtime_anomaly.standard", "local baseline risk recipe id for adapter signal deviations")
+	fs.IntVar(&opts.BaselineMinSamples, "baseline-min-samples", 5, "minimum clean samples before writing a frozen baseline version")
 	fs.BoolVar(&opts.Once, "once", false, "run one daemon cycle and exit; intended for smoke tests")
 	fs.Var(&adapters, "adapter", "dev/bootstrap adapter runtime endpoint as adapter_id=host:port; repeatable; managed production should prefer adapter_assignment artifacts")
 	fs.BoolVar(&opts.DevInsecureForgeTransport, "dev-insecure-forge-transport", false, "allow plaintext http Forge transport; dev/smoke only")
+	fs.StringVar(&opts.ForgeTransport.CAPath, "forge-ca", "", "Forge HTTPS CA bundle")
+	fs.StringVar(&opts.ForgeTransport.ClientCertPath, "forge-client-cert", "", "Forge mTLS client certificate")
+	fs.StringVar(&opts.ForgeTransport.ClientKeyPath, "forge-client-key", "", "Forge mTLS client private key")
+	fs.StringVar(&opts.ForgeTransport.ServerName, "forge-server-name", "", "expected Forge TLS server name")
+	fs.StringVar(&opts.ForgeTransport.ServerCertificateSHA256, "forge-cert-sha256", "", "expected Forge leaf certificate SHA-256 pin")
 	fs.BoolVar(&opts.AdapterTransport.DevInsecureAdapterTransport, "dev-insecure-adapter-transport", false, "allow plaintext adapter gRPC transport; dev/smoke only")
 	fs.StringVar(&opts.AdapterTransport.CAPath, "adapter-ca", "", "adapter mTLS CA bundle")
 	fs.StringVar(&opts.AdapterTransport.ClientCertPath, "adapter-client-cert", "", "adapter mTLS client certificate")
@@ -139,7 +168,7 @@ func runKLIQ(ctx context.Context, opts runOptions) error {
 	if err != nil {
 		return err
 	}
-	registry, closeAdapters, err := adapterRegistryFromFlags(opts.Adapters, opts.AdapterTransport)
+	registry, signalReaders, closeAdapters, err := adapterRegistryAndSignalsFromFlags(opts.Adapters, opts.AdapterTransport)
 	if err != nil {
 		return err
 	}
@@ -150,6 +179,8 @@ func runKLIQ(ctx context.Context, opts runOptions) error {
 		manager: kliqruntime.Manager{Store: store, Verifier: verifier, TrustBundle: trustBundle, Registry: registry},
 		now:     time.Now,
 	}
+	daemon.signalReaders = signalReaders
+	daemon.baselineSamples = map[string][]baseline.Sample{}
 	defer func() {
 		if daemon.closeManagedAdapters != nil {
 			daemon.closeManagedAdapters()
@@ -158,7 +189,11 @@ func runKLIQ(ctx context.Context, opts runOptions) error {
 	if opts.HTTPClient != nil {
 		daemon.httpClient = opts.HTTPClient
 	} else {
-		daemon.httpClient = http.DefaultClient
+		httpClient, err := forgeHTTPClient(opts.ForgeTransport)
+		if err != nil {
+			return err
+		}
+		daemon.httpClient = httpClient
 	}
 	if opts.DecisionSource != "" {
 		source, err := runtimeDecisionSourceFromFile(opts.DecisionSource)
@@ -207,6 +242,10 @@ func (d *runDaemon) runOnce(ctx context.Context) error {
 	if err := d.loadOrPoll(ctx); err != nil {
 		return err
 	}
+	if err := d.processAdapterSignals(ctx); err != nil {
+		logError("adapter_signal_ingestion_failed", "kliq_id", d.credential.KLIQID, "error", err.Error())
+		d.recordFinding("adapter signal ingestion failed: " + err.Error())
+	}
 	if err := d.processRuntimeDecisions(ctx); err != nil {
 		return err
 	}
@@ -236,12 +275,14 @@ func (d *runDaemon) loop(ctx context.Context) error {
 	heartbeatTicker := newTicker(d.opts.HeartbeatInterval)
 	statusTicker := newTicker(d.opts.StatusInterval)
 	decisionTicker := newTicker(d.opts.DecisionInterval)
+	signalTicker := newTicker(d.opts.SignalInterval)
 	reconcileTicker := newTicker(d.opts.ReconcileInterval)
 	auditTicker := newTicker(d.opts.AuditFlushInterval)
 	defer pollTicker.Stop()
 	defer heartbeatTicker.Stop()
 	defer statusTicker.Stop()
 	defer decisionTicker.Stop()
+	defer signalTicker.Stop()
 	defer reconcileTicker.Stop()
 	defer auditTicker.Stop()
 	for {
@@ -256,6 +297,7 @@ func (d *runDaemon) loop(ctx context.Context) error {
 				resetTicker(heartbeatTicker, d.opts.HeartbeatInterval)
 				resetTicker(statusTicker, d.opts.StatusInterval)
 				resetTicker(decisionTicker, d.opts.DecisionInterval)
+				resetTicker(signalTicker, d.opts.SignalInterval)
 				resetTicker(reconcileTicker, d.opts.ReconcileInterval)
 				resetTicker(auditTicker, d.opts.AuditFlushInterval)
 			}
@@ -274,6 +316,11 @@ func (d *runDaemon) loop(ctx context.Context) error {
 		case <-decisionTicker.C:
 			if err := d.processRuntimeDecisions(ctx); err != nil {
 				logError("runtime_decision_failed", "kliq_id", d.credential.KLIQID, "error", err.Error())
+			}
+		case <-signalTicker.C:
+			if err := d.processAdapterSignals(ctx); err != nil {
+				logError("adapter_signal_ingestion_failed", "kliq_id", d.credential.KLIQID, "error", err.Error())
+				d.recordFinding("adapter signal ingestion failed: " + err.Error())
 			}
 		case <-reconcileTicker.C:
 			if err := d.reconcile(ctx); err != nil {
@@ -488,10 +535,15 @@ func (d *runDaemon) flushAuditSpool(ctx context.Context) error {
 		logError("audit_flush_failed", "kliq_id", d.credential.KLIQID, "error", err.Error())
 		return err
 	}
-	for _, record := range records {
-		if d.opts.Mode != kliqRunModeManaged {
-			continue
+	if d.opts.Mode != kliqRunModeManaged {
+		if len(records) > 0 {
+			message := "standalone audit spool is local/offline only; use `kliq audit export` for controlled evidence export"
+			d.recordFinding(message)
+			logInfo("standalone_audit_spool_export_required", "pending", len(records), "mode", d.opts.Mode)
 		}
+		return nil
+	}
+	for _, record := range records {
 		if !auditRetryDue(record, d.now().UTC()) {
 			continue
 		}
@@ -564,6 +616,165 @@ func (d *runDaemon) processRuntimeDecisions(ctx context.Context) error {
 			logInfo("runtime_decision_processed", "kliq_id", d.credential.KLIQID, "plan_id", result.Plan.PlanID, "runtime_action_id", action.Lease.RuntimeActionID, "adapter_id", action.Lease.AdapterID, "capability_id", action.Lease.CapabilityID, "bundle_id", action.Lease.BundleID, "source_commit", action.Lease.SourceCommit, "correlation_id", redactID(action.Lease.CorrelationID), "status", string(action.Lease.Status), "applied", action.Applied)
 		}
 	}
+}
+
+func (d *runDaemon) processAdapterSignals(ctx context.Context) error {
+	if len(d.signalReaders) == 0 {
+		return nil
+	}
+	recipe, err := localBaselineRiskRecipe(d.opts.BaselineRiskRecipe)
+	if err != nil {
+		return err
+	}
+	scope := strings.TrimSpace(d.credential.Scope)
+	if scope == "" {
+		scope = "local_node"
+	}
+	for adapterID, reader := range d.signalReaders {
+		if reader == nil {
+			continue
+		}
+		signals, err := reader.ReadSignals(ctx, scope)
+		if err != nil {
+			d.recordFinding("adapter signal read failed for " + adapterID + ": " + err.Error())
+			continue
+		}
+		for _, signal := range signals {
+			if signal.ObservedAt.IsZero() {
+				signal.ObservedAt = d.daemonNow()
+			}
+			if err := d.processAdapterSignal(ctx, recipe, signal); err != nil {
+				d.recordFinding("adapter signal processing failed for " + adapterID + ": " + err.Error())
+				logError("adapter_signal_processing_failed", "kliq_id", d.credential.KLIQID, "adapter_id", adapterID, "signal_id", signal.SignalID, "error", err.Error())
+			}
+		}
+	}
+	return nil
+}
+
+func (d *runDaemon) processAdapterSignal(ctx context.Context, recipe registry.RiskRecipe, signal baseline.AdapterSignal) error {
+	var signalProjector baseline.SignalProjector
+	switch strings.TrimSpace(signal.AdapterID) {
+	case projector.KLShieldAdapterID:
+		signalProjector = projector.KLShieldProjector{}
+	default:
+		return nil
+	}
+	samples, err := signalProjector.Project(signal)
+	if err != nil {
+		return err
+	}
+	engine := baseline.Engine{
+		Store:      d.store,
+		Estimator:  baseline.MedianMADEstimator{MinSamples: d.baselineMinSamples()},
+		Now:        d.daemonNow,
+		MinSamples: d.baselineMinSamples(),
+	}
+	evaluator := localrisk.Evaluator{Store: d.store, Now: d.daemonNow}
+	for _, sample := range samples {
+		if err := d.evaluateBaselineSample(ctx, evaluator, recipe, sample); err != nil {
+			return err
+		}
+		if err := d.learnBaselineSample(ctx, engine, sample); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (d *runDaemon) evaluateBaselineSample(ctx context.Context, evaluator localrisk.Evaluator, recipe registry.RiskRecipe, sample baseline.Sample) error {
+	version, ok, err := d.store.ActiveBaselineVersion(ctx, sample.Key.View, sample.Key.Entity)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return nil
+	}
+	stats, err := d.store.BaselineStats(ctx, version.VersionID, sample.Metric)
+	if err != nil {
+		return err
+	}
+	event, deviates := baseline.EvaluateSample(sample, stats, d.daemonNow())
+	if !deviates {
+		return nil
+	}
+	event.RiskRecipe = recipe.ID
+	event.PolicyScope = d.credential.Scope
+	if err := d.store.SaveBaselineDeviation(ctx, event); err != nil {
+		return err
+	}
+	riskContext, err := evaluator.EvaluateDeviation(ctx, recipe, event)
+	if err != nil {
+		return err
+	}
+	logInfo("baseline_deviation_risk_cached", "kliq_id", d.credential.KLIQID, "event_id", event.EventID, "risk_type", riskContext.RiskType, "risk_tier", riskContext.Tier, "scope", riskContext.Scope)
+	return nil
+}
+
+func (d *runDaemon) learnBaselineSample(ctx context.Context, engine baseline.Engine, sample baseline.Sample) error {
+	key := baselineSampleBufferKey(sample)
+	if d.baselineSamples == nil {
+		d.baselineSamples = map[string][]baseline.Sample{}
+	}
+	buffer := append(d.baselineSamples[key], sample)
+	minSamples := d.baselineMinSamples()
+	if len(buffer) < minSamples {
+		d.baselineSamples[key] = buffer
+		return nil
+	}
+	_, _, learned, err := engine.LearnWindow(ctx, buffer, 0.90, 0.0, true, false)
+	if err != nil {
+		return err
+	}
+	if learned {
+		logInfo("baseline_version_frozen", "kliq_id", d.credential.KLIQID, "view", sample.Key.View, "entity", redactID(sample.Key.Entity), "metric", sample.Metric, "sample_count", len(buffer))
+	}
+	delete(d.baselineSamples, key)
+	return nil
+}
+
+func (d *runDaemon) baselineMinSamples() int {
+	if d.opts.BaselineMinSamples > 0 {
+		return d.opts.BaselineMinSamples
+	}
+	return 5
+}
+
+func (d *runDaemon) daemonNow() time.Time {
+	if d.now != nil {
+		return d.now().UTC()
+	}
+	return time.Now().UTC()
+}
+
+func baselineSampleBufferKey(sample baseline.Sample) string {
+	return sample.Key.View + "\x00" + sample.Key.Entity + "\x00" + sample.Metric
+}
+
+func localBaselineRiskRecipe(recipeID string) (registry.RiskRecipe, error) {
+	recipeID = strings.TrimSpace(recipeID)
+	if recipeID == "" {
+		recipeID = "runtime_anomaly.standard"
+	}
+	if recipeID != "runtime_anomaly.standard" {
+		return registry.RiskRecipe{}, fmt.Errorf("unsupported local baseline risk recipe %q", recipeID)
+	}
+	return registry.RiskRecipe{
+		ID:     "runtime_anomaly.standard",
+		Output: map[string]string{"risk_type": "runtime_anomaly"},
+		Scoring: map[string]string{
+			"method":      "weighted_sum",
+			"score_range": "0-100",
+		},
+		Thresholds: map[string]string{
+			"low":      "score < 30",
+			"medium":   "score >= 30 && score < 70",
+			"high":     "score >= 70 && score < 90",
+			"critical": "score >= 90",
+		},
+		Confidence: map[string]string{"minimum_for_enforcement": "0.70"},
+		Freshness:  map[string]string{"max_age": "2m", "stale_behavior": "unknown"},
+	}, nil
 }
 
 func (d *runDaemon) activeAssignment(ctx context.Context) actionstate.KLIQManagementState {
@@ -733,7 +944,7 @@ func (d *runDaemon) activateManagedArtifacts(ctx context.Context) error {
 	if len(assignments) == 0 {
 		return nil
 	}
-	registry, closeFn, err := adapterRegistryFromAssignments(assignments, d.opts.AdapterTransport)
+	registry, signalReaders, closeFn, err := adapterRegistryAndSignalsFromAssignments(assignments, d.opts.AdapterTransport)
 	if err != nil {
 		return err
 	}
@@ -742,6 +953,7 @@ func (d *runDaemon) activateManagedArtifacts(ctx context.Context) error {
 	}
 	d.closeManagedAdapters = closeFn
 	d.manager.Registry = registry
+	d.signalReaders = signalReaders
 	logInfo("adapter_assignment_activated", "kliq_id", d.credential.KLIQID, "adapters", strings.Join(adapterAssignmentLogValues(assignments), ","))
 	return nil
 }
@@ -1000,10 +1212,16 @@ func (s *fileRuntimeDecisionSource) NextDecision(_ context.Context) (kliqruntime
 }
 
 func adapterRegistryFromFlags(values []string, transport adapterTransportOptions) (kliqruntime.AdapterRuntimeRegistry, func(), error) {
+	registry, _, closeFn, err := adapterRegistryAndSignalsFromFlags(values, transport)
+	return registry, closeFn, err
+}
+
+func adapterRegistryAndSignalsFromFlags(values []string, transport adapterTransportOptions) (kliqruntime.AdapterRuntimeRegistry, map[string]AdapterSignalReader, func(), error) {
 	if len(values) == 0 {
-		return nil, func() {}, nil
+		return nil, nil, func() {}, nil
 	}
 	entries := make([]kliqruntime.StaticAdapterRuntimeEntry, 0, len(values))
+	signalReaders := map[string]AdapterSignalReader{}
 	var conns []*grpc.ClientConn
 	closeFn := func() {
 		for _, conn := range conns {
@@ -1014,30 +1232,39 @@ func adapterRegistryFromFlags(values []string, transport adapterTransportOptions
 		adapterID, addr, ok := strings.Cut(value, "=")
 		if !ok || strings.TrimSpace(adapterID) == "" || strings.TrimSpace(addr) == "" {
 			closeFn()
-			return nil, func() {}, fmt.Errorf("adapter must be adapter_id=host:port")
+			return nil, nil, func() {}, fmt.Errorf("adapter must be adapter_id=host:port")
 		}
 		dialOptions, err := adapterDialOptions(transport)
 		if err != nil {
 			closeFn()
-			return nil, func() {}, err
+			return nil, nil, func() {}, err
 		}
 		conn, err := grpc.NewClient(strings.TrimSpace(addr), dialOptions...)
 		if err != nil {
 			closeFn()
-			return nil, func() {}, err
+			return nil, nil, func() {}, err
 		}
+		adapterID = strings.TrimSpace(adapterID)
+		client := adapterv1.NewAdapterServiceClient(conn)
 		conns = append(conns, conn)
 		entries = append(entries, kliqruntime.StaticAdapterRuntimeEntry{
-			AdapterID: strings.TrimSpace(adapterID),
+			AdapterID: adapterID,
 			Executor:  kliqruntime.NewAdapterRuntimeExecutor(conn),
 		})
+		signalReaders[adapterID] = grpcAdapterSignalReader{adapterID: adapterID, client: client}
 	}
 	registry := kliqruntime.NewStaticAdapterRuntimeRegistry(entries...)
-	return registry, closeFn, nil
+	return registry, signalReaders, closeFn, nil
 }
 
 func adapterRegistryFromAssignments(assignments []domain.AdapterAssignment, transport adapterTransportOptions) (kliqruntime.AdapterRuntimeRegistry, func(), error) {
+	registry, _, closeFn, err := adapterRegistryAndSignalsFromAssignments(assignments, transport)
+	return registry, closeFn, err
+}
+
+func adapterRegistryAndSignalsFromAssignments(assignments []domain.AdapterAssignment, transport adapterTransportOptions) (kliqruntime.AdapterRuntimeRegistry, map[string]AdapterSignalReader, func(), error) {
 	entries := make([]kliqruntime.StaticAdapterRuntimeEntry, 0, len(assignments))
+	signalReaders := map[string]AdapterSignalReader{}
 	var conns []*grpc.ClientConn
 	closeFn := func() {
 		for _, conn := range conns {
@@ -1049,26 +1276,110 @@ func adapterRegistryFromAssignments(assignments []domain.AdapterAssignment, tran
 		endpoint := strings.TrimSpace(assignment.Endpoint)
 		if adapterID == "" || endpoint == "" {
 			closeFn()
-			return nil, func() {}, fmt.Errorf("adapter assignment requires adapter_id and endpoint")
+			return nil, nil, func() {}, fmt.Errorf("adapter assignment requires adapter_id and endpoint")
 		}
 		adapterTransport := adapterTransportForAssignment(transport, assignment)
 		dialOptions, err := adapterDialOptions(adapterTransport)
 		if err != nil {
 			closeFn()
-			return nil, func() {}, err
+			return nil, nil, func() {}, err
 		}
 		conn, err := grpc.NewClient(endpoint, dialOptions...)
 		if err != nil {
 			closeFn()
-			return nil, func() {}, err
+			return nil, nil, func() {}, err
 		}
+		client := adapterv1.NewAdapterServiceClient(conn)
 		conns = append(conns, conn)
 		entries = append(entries, kliqruntime.StaticAdapterRuntimeEntry{
 			AdapterID: adapterID,
 			Executor:  kliqruntime.NewAdapterRuntimeExecutor(conn),
 		})
+		signalReaders[adapterID] = grpcAdapterSignalReader{adapterID: adapterID, client: client}
 	}
-	return kliqruntime.NewStaticAdapterRuntimeRegistry(entries...), closeFn, nil
+	return kliqruntime.NewStaticAdapterRuntimeRegistry(entries...), signalReaders, closeFn, nil
+}
+
+func (r grpcAdapterSignalReader) ReadSignals(ctx context.Context, scope string) ([]baseline.AdapterSignal, error) {
+	if r.client == nil {
+		return nil, fmt.Errorf("adapter signal reader %q has no client", r.adapterID)
+	}
+	resp, err := r.client.ReadSignals(ctx, &adapterv1.ReadSignalsRequest{Scope: scope})
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now
+	if r.now != nil {
+		now = r.now
+	}
+	signals := make([]baseline.AdapterSignal, 0, len(resp.GetSignals()))
+	for _, signal := range resp.GetSignals() {
+		converted, err := baselineSignalFromProto(signal, now().UTC())
+		if err != nil {
+			return nil, err
+		}
+		if converted.AdapterID == "" {
+			converted.AdapterID = r.adapterID
+		}
+		signals = append(signals, converted)
+	}
+	return signals, nil
+}
+
+func baselineSignalFromProto(signal *adapterv1.Signal, observedAt time.Time) (baseline.AdapterSignal, error) {
+	if signal == nil {
+		return baseline.AdapterSignal{}, fmt.Errorf("adapter signal is nil")
+	}
+	labels := map[string]string{
+		"entity": signal.GetScope(),
+		"scope":  signal.GetScope(),
+	}
+	metrics := map[string]float64{}
+	if len(signal.GetPayload()) > 0 {
+		var payload map[string]any
+		decoder := json.NewDecoder(bytes.NewReader(signal.GetPayload()))
+		decoder.UseNumber()
+		if err := decoder.Decode(&payload); err != nil {
+			return baseline.AdapterSignal{}, err
+		}
+		for key, value := range payload {
+			if number, ok := numericMetric(value); ok {
+				metrics[key] = number
+				continue
+			}
+			if text, ok := value.(string); ok && strings.TrimSpace(text) != "" {
+				labels[key] = strings.TrimSpace(text)
+			}
+		}
+	}
+	return baseline.AdapterSignal{
+		SignalID:   signal.GetId(),
+		AdapterID:  signal.GetSource(),
+		SignalType: signal.GetType(),
+		Labels:     labels,
+		Metrics:    metrics,
+		ObservedAt: observedAt.UTC(),
+	}, nil
+}
+
+func numericMetric(value any) (float64, bool) {
+	switch typed := value.(type) {
+	case json.Number:
+		parsed, err := typed.Float64()
+		return parsed, err == nil
+	case float64:
+		return typed, true
+	case float32:
+		return float64(typed), true
+	case int:
+		return float64(typed), true
+	case int64:
+		return float64(typed), true
+	case uint64:
+		return float64(typed), true
+	default:
+		return 0, false
+	}
 }
 
 func adapterTransportForAssignment(transport adapterTransportOptions, assignment domain.AdapterAssignment) adapterTransportOptions {

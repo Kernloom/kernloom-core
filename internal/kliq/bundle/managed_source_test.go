@@ -5,6 +5,7 @@ package bundle
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -152,6 +153,102 @@ func TestManagedAssignmentSourceAcceptsSignedApprovedRollback(t *testing.T) {
 	}
 }
 
+func TestManagedAssignmentSourceUsesArtifactVerificationTrustBundle(t *testing.T) {
+	now := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+	assignmentSigner, err := signing.NewDevLocalSigner("forge-management-dev-local")
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifactSigner, err := signing.NewDevLocalSigner("artifact-key-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assignmentSigner.Now = func() time.Time { return now }
+	artifactSigner.Now = func() time.Time { return now }
+	runtimeEnvelope := managedSourceSignedRuntimeEnvelope(t, artifactSigner, now)
+	assignment := managedSourceTestAssignment(now, runtimeEnvelope)
+	trustEnvelope := managedSourceSignedTrustBundleEnvelope(t, assignmentSigner, domain.TrustBundle{
+		KeyID:     artifactSigner.KeyID,
+		PublicKey: base64.StdEncoding.EncodeToString(artifactSigner.PublicKey),
+		Purpose:   "artifact_verification",
+		Status:    "active",
+		ExpiresAt: now.Add(time.Hour),
+		Issuer:    "forge-management-test",
+	}, now)
+	assignment.Artifacts = append([]domain.KLIQAssignedArtifact{{
+		ArtifactType: "trust_bundle",
+		ArtifactID:   "trust_bundle.artifact-key-1",
+		SHA256:       domain.SHA256JSON(trustEnvelope),
+		Envelope:     trustEnvelope,
+	}}, assignment.Artifacts...)
+	envelope := signedAssignmentEnvelope(t, assignmentSigner, assignment, now.Add(time.Hour))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(envelope)
+	}))
+	defer server.Close()
+
+	_, _, err = (&ManagedAssignmentSource{
+		BaseURL:     server.URL,
+		KLIQID:      assignment.KLIQID,
+		Environment: assignment.Environment,
+		Stage:       assignment.Stage,
+		Scope:       assignment.Scope,
+		TrustKeyID:  assignment.TrustKeyID,
+		Verifier:    assignmentSigner,
+	}).Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestManagedAssignmentSourceRejectsAssignmentSignedArtifactWhenArtifactTrustBundlePresent(t *testing.T) {
+	now := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+	assignmentSigner, err := signing.NewDevLocalSigner("forge-management-dev-local")
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifactSigner, err := signing.NewDevLocalSigner("artifact-key-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assignmentSigner.Now = func() time.Time { return now }
+	artifactSigner.Now = func() time.Time { return now }
+	runtimeEnvelope := managedSourceSignedRuntimeEnvelope(t, assignmentSigner, now)
+	assignment := managedSourceTestAssignment(now, runtimeEnvelope)
+	trustEnvelope := managedSourceSignedTrustBundleEnvelope(t, assignmentSigner, domain.TrustBundle{
+		KeyID:     artifactSigner.KeyID,
+		PublicKey: base64.StdEncoding.EncodeToString(artifactSigner.PublicKey),
+		Purpose:   "artifact_verification",
+		Status:    "active",
+		ExpiresAt: now.Add(time.Hour),
+		Issuer:    "forge-management-test",
+	}, now)
+	assignment.Artifacts = append([]domain.KLIQAssignedArtifact{{
+		ArtifactType: "trust_bundle",
+		ArtifactID:   "trust_bundle.artifact-key-1",
+		SHA256:       domain.SHA256JSON(trustEnvelope),
+		Envelope:     trustEnvelope,
+	}}, assignment.Artifacts...)
+	envelope := signedAssignmentEnvelope(t, assignmentSigner, assignment, now.Add(time.Hour))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(envelope)
+	}))
+	defer server.Close()
+
+	_, _, err = (&ManagedAssignmentSource{
+		BaseURL:     server.URL,
+		KLIQID:      assignment.KLIQID,
+		Environment: assignment.Environment,
+		Stage:       assignment.Stage,
+		Scope:       assignment.Scope,
+		TrustKeyID:  assignment.TrustKeyID,
+		Verifier:    assignmentSigner,
+	}).Load(context.Background())
+	if err == nil {
+		t.Fatal("expected runtime artifact signed by assignment key to be rejected once artifact_verification trust bundle is present")
+	}
+}
+
 func managedSourceTestAssignment(now time.Time, runtimeEnvelope json.RawMessage) domain.KLIQAssignment {
 	return domain.KLIQAssignment{
 		AssignmentID:      "kliq_assignment.test",
@@ -172,6 +269,26 @@ func managedSourceTestAssignment(now time.Time, runtimeEnvelope json.RawMessage)
 			Envelope:     runtimeEnvelope,
 		}},
 	}
+}
+
+func managedSourceSignedTrustBundleEnvelope(t *testing.T, signer *signing.DevLocalSigner, bundle domain.TrustBundle, now time.Time) json.RawMessage {
+	t.Helper()
+	payload, err := json.Marshal(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope, err := signer.Sign(context.Background(), payload, signing.Metadata{
+		SourceCommit: "abc123",
+		ExpiresAt:    ptrTime(now.Add(time.Hour)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
 }
 
 func signedAssignmentEnvelope(t *testing.T, signer *signing.DevLocalSigner, assignment domain.KLIQAssignment, expiresAt time.Time) signing.SignedEnvelope {
