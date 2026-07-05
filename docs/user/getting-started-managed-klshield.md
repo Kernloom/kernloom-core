@@ -18,7 +18,7 @@ section.
 Run from the workspace root:
 
 ```sh
-cd /home/adrian/prj/kernloom
+export KERNLOOM_HOME="$PWD"
 podman compose -f docker-compose.dev.yml up -d postgres
 
 (cd kernloom-core && make build)
@@ -28,7 +28,7 @@ podman compose -f docker-compose.dev.yml up -d postgres
 Set shared variables:
 
 ```sh
-cd /home/adrian/prj/kernloom
+cd "$KERNLOOM_HOME"
 
 export WORK=/tmp/kernloom-getting-started
 export STATE="$WORK/kliq-state.db"
@@ -42,13 +42,16 @@ export PG_DSN="postgres://kernloom:kernloom-dev-password@127.0.0.1:5432/kernloom
 mkdir -p "$WORK"
 ```
 
+For each new shell used below, set `KERNLOOM_HOME` to the same workspace root
+before running the commands in that shell.
+
 ## Compile The Policy Intent
 
 Compile the existing runtime mitigation intent. Use `--build-created-by alice`
 so the later review/approval token is a different identity.
 
 ```sh
-cd /home/adrian/prj/kernloom/kernloom-core
+cd "$KERNLOOM_HOME/kernloom-core"
 
 ./bin/forge compile \
   --policy-repo ../enterprise-kernloom-policies \
@@ -86,7 +89,7 @@ This starts Forge with a persistent Postgres management store and explicit
 dev-local plaintext HTTP:
 
 ```sh
-cd /home/adrian/prj/kernloom/kernloom-core
+cd "$KERNLOOM_HOME/kernloom-core"
 
 ./bin/forge migrate --management-postgres-dsn "$PG_DSN"
 
@@ -109,7 +112,7 @@ Keep this process running.
 In a second shell:
 
 ```sh
-cd /home/adrian/prj/kernloom/kernloom-core
+cd "$KERNLOOM_HOME/kernloom-core"
 
 APPROVAL_JSON="$(
   curl -sS -H "Authorization: Bearer ${REVIEWER_TOKEN}" \
@@ -206,7 +209,7 @@ printf '%s\n' "$ASSIGNMENT_JSON" | jq .
 For the fastest local smoke test, use the memory runtime store:
 
 ```sh
-cd /home/adrian/prj/kernloom/kernloom-adapter-klshield
+cd "$KERNLOOM_HOME/kernloom-adapter-klshield"
 
 ./bin/kernloom-adapter-klshield serve \
   --addr 127.0.0.1:18082 \
@@ -222,7 +225,7 @@ Keep this process running.
 In another shell:
 
 ```sh
-cd /home/adrian/prj/kernloom/kernloom-core
+cd "$KERNLOOM_HOME/kernloom-core"
 
 cat > "$WORK/runtime-decision.json" <<EOF
 {
@@ -274,7 +277,7 @@ KLShield maps, first load and pin the KLShield PEP maps from `kernloom-shield`
 on a Linux host, then run the adapter with the BPF store:
 
 ```sh
-cd /home/adrian/prj/kernloom/kernloom-adapter-klshield
+cd "$KERNLOOM_HOME/kernloom-adapter-klshield"
 
 sudo ./bin/kernloom-adapter-klshield serve \
   --addr 127.0.0.1:18082 \
