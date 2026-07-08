@@ -30,3 +30,15 @@ func TestSignerTLSConfigRequiresCertAndKeyTogether(t *testing.T) {
 		t.Fatal("expected missing signer tls cert to be rejected")
 	}
 }
+
+func TestValidateSignerProductionConfigRequiresMTLSAndNonDevKey(t *testing.T) {
+	if err := validateSignerProductionConfig("server.crt", "server.key", "ca.pem", false, "forge-management-prod"); err != nil {
+		t.Fatalf("expected production signer config, got %v", err)
+	}
+	if err := validateSignerProductionConfig("server.crt", "server.key", "", false, "forge-management-prod"); err == nil || !strings.Contains(err.Error(), "client-ca") {
+		t.Fatalf("expected client ca requirement, got %v", err)
+	}
+	if err := validateSignerProductionConfig("server.crt", "server.key", "ca.pem", false, "forge-management-dev-local"); err == nil || !strings.Contains(err.Error(), "non-dev") {
+		t.Fatalf("expected non-dev key id requirement, got %v", err)
+	}
+}

@@ -184,6 +184,7 @@ func TestManagerLoadManagedBundleActivatesFullAssignmentArtifacts(t *testing.T) 
 	signer := testSigner(t, now)
 	assignment := managedTestAssignment(now, signer.KeyID, 1, signedBundleData(t, signer, now, now.Add(time.Hour)))
 	assignment.Artifacts = append(assignment.Artifacts,
+		signedAssignmentArtifact(t, signer, now, "adapter_manifest", "adapter_manifest.klshield", testAdapterManifestArtifact(now)),
 		signedAssignmentArtifact(t, signer, now, "adapter_assignment", "adapter_assignment.klshield", domain.AdapterAssignment{
 			Kind:      "AdapterAssignment",
 			AdapterID: testAdapterID,
@@ -253,7 +254,7 @@ func TestManagerLoadManagedBundleActivatesFullAssignmentArtifacts(t *testing.T) 
 	if _, err := manager.LoadManagedBundle(ctx, managedAssignmentSource(server.URL, signer.KeyID)); err != nil {
 		t.Fatal(err)
 	}
-	for _, artifactType := range []string{"runtime_bundle", "adapter_assignment", "context_route_pack", "conformance_expectation", "trust_bundle", "management_profile", "fallback_profile"} {
+	for _, artifactType := range []string{"runtime_bundle", "adapter_manifest", "adapter_assignment", "context_route_pack", "conformance_expectation", "trust_bundle", "management_profile", "fallback_profile"} {
 		record, err := store.ActiveArtifact(ctx, "kliq.test", artifactType)
 		if err != nil {
 			t.Fatalf("expected active %s artifact: %v", artifactType, err)
@@ -266,8 +267,8 @@ func TestManagerLoadManagedBundleActivatesFullAssignmentArtifacts(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(records) != 7 {
-		t.Fatalf("expected seven activated artifacts, got %#v", records)
+	if len(records) != 8 {
+		t.Fatalf("expected eight activated artifacts, got %#v", records)
 	}
 	for _, record := range records {
 		if record.ActivationStatus != "activated" {
@@ -1237,6 +1238,35 @@ func testRuntimeBundle() corebundle.RuntimeBundle {
 			MaxScope: "source",
 		},
 		Status: coreartifact.PlannedStatus("slice 4 test bundle"),
+	}
+}
+
+func testAdapterManifestArtifact(now time.Time) map[string]any {
+	return map[string]any{
+		"kind": "AdapterManifest",
+		"metadata": coreartifact.Metadata{
+			ID:           "adapter_manifest.kernloom.adapter.klshield",
+			PolicyID:     "policy.runtime",
+			ArtifactType: "adapter_manifest",
+			SourceCommit: "abc123",
+			CreatedAt:    now,
+			Digests: map[string]string{
+				"adapter_manifest:" + testAdapterID: "sha256:adapter-manifest-test",
+			},
+		},
+		"spec": map[string]any{
+			"digest":           "sha256:adapter-manifest-test",
+			"adapter_id":       testAdapterID,
+			"adapter_version":  "0.1.0",
+			"protocol_version": "adapter/v1",
+			"status":           "stable",
+			"capabilities": []map[string]any{
+				{
+					"capability_id":         testCapabilityID,
+					"implementation_status": "implemented",
+				},
+			},
+		},
 	}
 }
 

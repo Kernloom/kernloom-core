@@ -216,6 +216,13 @@ func TestKLIQEnrollmentAssignmentHeartbeatAndStatusFlow(t *testing.T) {
 	if envelope.KeyID != "forge-management-dev-local" || len(envelope.Signature) == 0 {
 		t.Fatalf("expected signed assignment envelope, got %#v", envelope)
 	}
+	var assignment domain.KLIQAssignment
+	if err := json.Unmarshal(envelope.Payload, &assignment); err != nil {
+		t.Fatal(err)
+	}
+	if assignment.Provenance == nil || assignment.Provenance.ApprovedBuildID == "" || assignment.Provenance.ApprovedBuildDigest != approvedBuildRef.SHA256 {
+		t.Fatalf("expected assignment approved-build provenance, got %#v", assignment.Provenance)
+	}
 
 	latestResp := httptest.NewRecorder()
 	latestReq := httptest.NewRequest(http.MethodGet, "/v1/kliq/assignments/"+registration.KLIQID+"/latest", nil)
@@ -614,12 +621,20 @@ func TestProductionAssignmentPlannerRejectsUnsignedApprovedBuildManifest(t *test
 			Scope:         registration.Scope,
 		},
 		Spec: compiler.ManifestSpec{
-			PolicyRepo:         compiler.PolicyRepoRef{Commit: "abc123"},
+			PolicyRepo:         compiler.PolicyRepoRef{Commit: "abc123", ContentDigest: "sha256:policy-repo"},
 			EnterpriseRegistry: compiler.RegistryRef{ContentDigest: "sha256:enterprise-registry"},
 			CoreRegistry:       compiler.RegistryRef{ContentDigest: "sha256:core-registry"},
 			Profile:            compiler.DigestRef{Digest: "sha256:profile"},
 			RiskRecipe:         compiler.DigestRef{Digest: "sha256:risk"},
 			CatalogDigest:      "sha256:catalog",
+			FederatedSourceDigests: map[string]string{
+				"policy_repo":         "sha256:policy-repo",
+				"enterprise_registry": "sha256:enterprise-registry",
+				"core_registry":       "sha256:core-registry",
+				"profile":             "sha256:profile",
+				"risk_recipe":         "sha256:risk",
+				"catalog":             "sha256:catalog",
+			},
 			SignedOutputs: map[string]compiler.SignedOutputRef{
 				"runtime_bundle": {ArtifactRef: ref, EnvelopeSHA256: ref.SHA256, PayloadSHA256: "sha256:payload-runtime_bundle", KeyID: signer.KeyID},
 			},
@@ -1291,6 +1306,112 @@ func requireAuditEvent(t *testing.T, events []domain.ManagementAuditEvent, event
 	return domain.ManagementAuditEvent{}
 }
 
+func TestValidateFederatedSourceDigestsRejectsMissingDigests(t *testing.T) {
+	manifest := federatedSourceDigestManifestForTest()
+	manifest.Spec.FederatedSourceDigests = nil
+
+	err := validateFederatedSourceDigests(manifest)
+	if err == nil || !strings.Contains(err.Error(), "approved_build_missing_federated_source_digests") {
+		t.Fatalf("expected missing federated source digests error, got %v", err)
+	}
+}
+
+func TestValidateFederatedSourceDigestsRejectsMismatch(t *testing.T) {
+	manifest := federatedSourceDigestManifestForTest()
+	manifest.Spec.FederatedSourceDigests["core_registry"] = "sha256:other-core"
+
+	err := validateFederatedSourceDigests(manifest)
+	if err == nil || !strings.Contains(err.Error(), "approved_build_federated_source_digest_mismatch") {
+		t.Fatalf("expected federated source digest mismatch error, got %v", err)
+	}
+}
+
+func TestValidateApprovedBuildSignedAdapterManifestsRejectsMissingRef(t *testing.T) {
+	manifest := federatedSourceDigestManifestForTest()
+	manifest.Spec.Adapters["kernloom.adapter.klshield"] = compiler.AdapterRef{
+		AdapterID:       "kernloom.adapter.klshield",
+		ManifestDigest:  "sha256:adapter-manifest",
+		ProtocolVersion: "adapter/v1",
+	}
+
+	err := validateApprovedBuildSignedAdapterManifests(manifest)
+	if err == nil || !strings.Contains(err.Error(), "approved_build_missing_signed_adapter_manifest") {
+		t.Fatalf("expected missing signed adapter manifest error, got %v", err)
+	}
+}
+
+func TestValidateRuntimeBundleAdapterManifestPairRequiresAdapterManifestArtifact(t *testing.T) {
+	manifest := federatedSourceDigestManifestForTest()
+	manifest.Spec.Bindings = map[string]compiler.BindingRef{
+		"binding.klshield": {BindingID: "binding.klshield", Digest: "sha256:binding", AdapterID: "kernloom.adapter.klshield", CapabilityID: "enforce.runtime.rate_limit_entity"},
+	}
+	manifest.Spec.RuntimeActions = map[string]compiler.RuntimeActionRef{
+		"grant.klshield": {
+			CapabilityGrantID:     "grant.klshield",
+			BindingID:             "binding.klshield",
+			AdapterID:             "kernloom.adapter.klshield",
+			AdapterManifestDigest: "sha256:adapter-manifest",
+			CapabilityID:          "enforce.runtime.rate_limit_entity",
+			ActionType:            "runtime_action.rate_limit_entity",
+			ActionDigest:          "sha256:action",
+		},
+	}
+
+	err := validateRuntimeBundleAdapterManifestPair(manifest, []domain.KLIQAssignedArtifact{
+		{ArtifactType: "runtime_bundle", ArtifactRef: "artifact://runtime", SHA256: "sha256:runtime-envelope"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "approved_build_missing_adapter_manifest_artifact") {
+		t.Fatalf("expected missing adapter manifest artifact error, got %v", err)
+	}
+
+	err = validateRuntimeBundleAdapterManifestPair(manifest, []domain.KLIQAssignedArtifact{
+		{ArtifactType: "runtime_bundle", ArtifactRef: "artifact://runtime", SHA256: "sha256:runtime-envelope"},
+		{ArtifactType: "adapter_manifest", ArtifactRef: "artifact://adapter-manifest", SHA256: "sha256:adapter-envelope"},
+	})
+	if err != nil {
+		t.Fatalf("expected adapter manifest pair to pass, got %v", err)
+	}
+}
+
+func federatedSourceDigestManifestForTest() compiler.PolicyBuildManifest {
+	signedAdapter := compiler.SignedOutputRef{
+		ArtifactRef:    coreartifact.Ref{URI: "artifact://adapter-manifest", SHA256: "sha256:adapter-envelope"},
+		EnvelopeSHA256: "sha256:adapter-envelope",
+		PayloadSHA256:  "sha256:adapter-payload",
+		KeyID:          "forge-management-dev-local",
+	}
+	return compiler.PolicyBuildManifest{
+		Spec: compiler.ManifestSpec{
+			PolicyRepo:         compiler.PolicyRepoRef{ContentDigest: "sha256:policy-repo"},
+			CoreRegistry:       compiler.RegistryRef{ContentDigest: "sha256:core-registry"},
+			EnterpriseRegistry: compiler.RegistryRef{ContentDigest: "sha256:enterprise-registry"},
+			Profile:            compiler.DigestRef{Digest: "sha256:profile"},
+			RiskRecipe:         compiler.DigestRef{Digest: "sha256:risk"},
+			CatalogDigest:      "sha256:catalog",
+			Adapters: map[string]compiler.AdapterRef{
+				"kernloom.adapter.klshield": {
+					AdapterID:       "kernloom.adapter.klshield",
+					ManifestDigest:  "sha256:adapter-manifest",
+					ProtocolVersion: "adapter/v1",
+					SignedManifest:  signedAdapter,
+				},
+			},
+			SignedOutputs: map[string]compiler.SignedOutputRef{
+				"adapter_manifest:kernloom.adapter.klshield": signedAdapter,
+			},
+			FederatedSourceDigests: map[string]string{
+				"policy_repo":                       "sha256:policy-repo",
+				"core_registry":                     "sha256:core-registry",
+				"enterprise_registry":               "sha256:enterprise-registry",
+				"profile":                           "sha256:profile",
+				"risk_recipe":                       "sha256:risk",
+				"catalog":                           "sha256:catalog",
+				"adapter:kernloom.adapter.klshield": "sha256:adapter-manifest",
+			},
+		},
+	}
+}
+
 func putApprovedBuildManifest(t *testing.T, store *artifactstore.MemoryStore, signer *signing.DevLocalSigner, sourceCommit, environment, stage, scope string, outputs map[string]coreartifact.Ref) coreartifact.Ref {
 	t.Helper()
 	return putBuildManifest(t, store, signer, sourceCommit, compiler.ManifestApproval{
@@ -1350,7 +1471,15 @@ func putBuildManifestCreatedBy(t *testing.T, store *artifactstore.MemoryStore, s
 			Profile:            compiler.DigestRef{ID: "profile.test", Digest: "sha256:profile"},
 			RiskRecipe:         compiler.DigestRef{ID: "risk.test", Digest: "sha256:risk"},
 			CatalogDigest:      "sha256:catalog",
-			SignedOutputs:      signedOutputs,
+			FederatedSourceDigests: map[string]string{
+				"policy_repo":         "sha256:policy-repo",
+				"enterprise_registry": "sha256:enterprise-registry",
+				"core_registry":       "sha256:core-registry",
+				"profile":             "sha256:profile",
+				"risk_recipe":         "sha256:risk",
+				"catalog":             "sha256:catalog",
+			},
+			SignedOutputs: signedOutputs,
 		},
 	}
 	payload, err := json.Marshal(manifest)
