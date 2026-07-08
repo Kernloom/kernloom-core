@@ -7,7 +7,7 @@ toolchain go1.26.4
 require (
 	github.com/google/cel-go v0.28.1
 	github.com/jackc/pgx/v5 v5.10.0
-	github.com/kernloom/kernloom-protocol v0.0.0-20260708121330-29a6bd5bd1e9
+	github.com/kernloom/kernloom-protocol v0.0.0-20260708124119-9690cc6a5d0a
 	google.golang.org/grpc v1.82.0
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.53.0
