@@ -27,7 +27,7 @@ func TestMedianMADEstimatorHandlesOutliersAndInsufficientSamples(t *testing.T) {
 	}
 }
 
-func TestEngineLearnsFrozenPromotedVersionFromCleanWindow(t *testing.T) {
+func TestEngineLearnsFrozenVersionFromCleanWindow(t *testing.T) {
 	now := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
 	store := &memoryBaselineStore{}
 	engine := Engine{Store: store, Now: func() time.Time { return now }}
@@ -38,12 +38,28 @@ func TestEngineLearnsFrozenPromotedVersionFromCleanWindow(t *testing.T) {
 		sample(11, now.Add(-2*time.Second)),
 		sample(10, now.Add(-time.Second)),
 	}
-	version, stats, learned, err := engine.LearnWindow(context.Background(), samples, 0.9, 0.01, true, true)
+	version, stats, learned, err := engine.LearnWindow(context.Background(), samples, 0.9, 0.01, true, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !learned || version.VersionID == "" || version.PromotedAt.IsZero() || len(stats) != 1 {
-		t.Fatalf("expected promoted version and stats, got version=%#v stats=%#v learned=%t", version, stats, learned)
+	if !learned || version.VersionID == "" || !version.PromotedAt.IsZero() || len(stats) != 1 {
+		t.Fatalf("expected frozen non-promoted version and stats, got version=%#v stats=%#v learned=%t", version, stats, learned)
+	}
+}
+
+func TestEngineRejectsInlinePromotion(t *testing.T) {
+	now := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
+	store := &memoryBaselineStore{}
+	engine := Engine{Store: store, Now: func() time.Time { return now }}
+	_, _, _, err := engine.LearnWindow(context.Background(), []Sample{
+		sample(10, now.Add(-5*time.Second)),
+		sample(11, now.Add(-4*time.Second)),
+		sample(12, now.Add(-3*time.Second)),
+		sample(11, now.Add(-2*time.Second)),
+		sample(10, now.Add(-time.Second)),
+	}, 0.9, 0.01, true, true)
+	if err == nil {
+		t.Fatal("expected inline promotion to be rejected")
 	}
 }
 
@@ -87,7 +103,7 @@ func (s *memoryBaselineStore) SaveBaselineWindow(_ context.Context, window Windo
 	return nil
 }
 
-func (s *memoryBaselineStore) SaveBaselineVersion(_ context.Context, version VersionRef, stats []Stats, _ bool) error {
+func (s *memoryBaselineStore) SaveBaselineVersion(_ context.Context, version VersionRef, stats []Stats) error {
 	s.versions = append(s.versions, version)
 	s.stats = append(s.stats, stats...)
 	return nil

@@ -353,6 +353,12 @@ func TestManagerExecutesRequiredActionThroughPlanAndDeduplicates(t *testing.T) {
 	if result.Lease.CorrelationID != "correlation.bundle.test" {
 		t.Fatalf("expected bundle correlation id to propagate through lease, got %#v", result.Lease)
 	}
+	if result.Lease.BindingID != "binding.test.klshield" ||
+		result.Lease.BindingDigest != "sha256:binding-test" ||
+		result.Lease.AdapterManifestDigest != "sha256:adapter-manifest-test" ||
+		result.Lease.ActionDigest != "sha256:action-test" {
+		t.Fatalf("expected runtime provenance to propagate through lease, got %#v", result.Lease)
+	}
 	if !result.Lease.ExpiresAt.Equal(now.Add(time.Minute)) {
 		t.Fatalf("expected one minute ttl, got %s", result.Lease.ExpiresAt)
 	}
@@ -363,6 +369,22 @@ func TestManagerExecutesRequiredActionThroughPlanAndDeduplicates(t *testing.T) {
 	}
 	if len(audits) != 1 || audits[0].RuntimeActionID != result.Lease.RuntimeActionID {
 		t.Fatalf("expected one pending audit record for activated action, got %#v", audits)
+	}
+	if audits[0].BindingID != result.Lease.BindingID ||
+		audits[0].BindingDigest != result.Lease.BindingDigest ||
+		audits[0].AdapterManifestDigest != result.Lease.AdapterManifestDigest ||
+		audits[0].ActionDigest != result.Lease.ActionDigest {
+		t.Fatalf("expected runtime provenance to propagate through audit spool, got %#v", audits[0])
+	}
+	var auditPayload map[string]string
+	if err := json.Unmarshal([]byte(audits[0].Payload), &auditPayload); err != nil {
+		t.Fatal(err)
+	}
+	if auditPayload["binding_id"] != result.Lease.BindingID ||
+		auditPayload["binding_digest"] != result.Lease.BindingDigest ||
+		auditPayload["adapter_manifest_digest"] != result.Lease.AdapterManifestDigest ||
+		auditPayload["action_digest"] != result.Lease.ActionDigest {
+		t.Fatalf("expected runtime provenance in audit payload, got %#v", auditPayload)
 	}
 	duplicate := executeTestAction(t, manager, ctx, ExecuteRequest{
 		DecisionID: "decision.test-2",
@@ -378,6 +400,55 @@ func TestManagerExecutesRequiredActionThroughPlanAndDeduplicates(t *testing.T) {
 		t.Fatalf("expected duplicate not to extend ttl, got %s want %s", duplicate.Lease.ExpiresAt, result.Lease.ExpiresAt)
 	}
 	assertJournalEvent(t, store, ctx, result.Lease.RuntimeActionID, "deduplicated")
+}
+
+func TestManagerRejectsRequestedProvenanceMismatch(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC)
+	store := openTestStore(t)
+	defer store.Close()
+	signer := testSigner(t, now)
+	bundlePath := signedBundleFile(t, signer, now, now.Add(time.Hour))
+	manager := testManager(store, signer, now, testAdapter(testAdapterID, LocalTestExecutor{}))
+	if _, err := manager.LoadBundle(ctx, kliqbundle.LocalFileSource{Path: bundlePath}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := manager.ExecuteAction(ctx, defaultExecuteRequest(ExecuteRequest{
+		DecisionID:            "decision.mismatch",
+		TargetKey:             "source-mismatch",
+		Reason:                "test mismatch",
+		AuditID:               "audit.mismatch",
+		AdapterManifestDigest: "sha256:not-the-approved-manifest",
+	}))
+	if err == nil || !strings.Contains(err.Error(), "requested adapter_manifest_digest") {
+		t.Fatalf("expected requested provenance mismatch rejection, got %v", err)
+	}
+}
+
+func TestManagerRejectsRuntimeGrantWithoutProvenance(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC)
+	store := openTestStore(t)
+	defer store.Close()
+	signer := testSigner(t, now)
+	runtimeBundle := testRuntimeBundle()
+	runtimeBundle.Spec.CapabilityGrants[0].AdapterManifestDigest = ""
+	bundlePath := signedBundleFileForBundle(t, signer, runtimeBundle, now, now.Add(time.Hour))
+	manager := testManager(store, signer, now, testAdapter(testAdapterID, LocalTestExecutor{}))
+	if _, err := manager.LoadBundle(ctx, kliqbundle.LocalFileSource{Path: bundlePath}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := manager.ExecuteAction(ctx, defaultExecuteRequest(ExecuteRequest{
+		DecisionID: "decision.missing-provenance",
+		TargetKey:  "source-missing-provenance",
+		Reason:     "test missing provenance",
+		AuditID:    "audit.missing-provenance",
+	}))
+	if err == nil || !strings.Contains(err.Error(), "missing required provenance field adapter_manifest_digest") {
+		t.Fatalf("expected missing runtime grant provenance rejection, got %v", err)
+	}
 }
 
 func TestManagerAllowsDecisionCorrelationIDToOverrideBundleCorrelationID(t *testing.T) {
@@ -1117,37 +1188,49 @@ func testRuntimeBundle() corebundle.RuntimeBundle {
 			},
 			CapabilityGrants: []corebundle.CapabilityGrant{
 				{
-					ID:                  testCapabilityGrantID,
-					AdapterID:           testAdapterID,
-					CapabilityID:        testCapabilityID,
-					ActionType:          "runtime_action.deny_temporarily_source",
-					AllowedTargetScopes: []string{"source"},
-					MaxTTL:              "2m",
-					Stage:               "prod",
-					Owner:               "security-platform",
-					ApprovalRef:         "build.policy.runtime",
+					ID:                    testCapabilityGrantID,
+					AdapterID:             testAdapterID,
+					CapabilityID:          testCapabilityID,
+					ActionType:            "runtime_action.deny_temporarily_source",
+					BindingID:             "binding.test.klshield",
+					BindingDigest:         "sha256:binding-test",
+					AdapterManifestDigest: "sha256:adapter-manifest-test",
+					ActionDigest:          "sha256:action-test",
+					AllowedTargetScopes:   []string{"source"},
+					MaxTTL:                "2m",
+					Stage:                 "prod",
+					Owner:                 "security-platform",
+					ApprovalRef:           "build.policy.runtime",
 				},
 				{
-					ID:                  "grant.nginx.klshield.runtime.source_mitigation",
-					AdapterID:           testAdapterIDAlt,
-					CapabilityID:        testCapabilityID,
-					ActionType:          "runtime_action.deny_temporarily_source",
-					AllowedTargetScopes: []string{"source"},
-					MaxTTL:              "2m",
-					Stage:               "prod",
-					Owner:               "security-platform",
-					ApprovalRef:         "build.policy.runtime",
+					ID:                    "grant.nginx.klshield.runtime.source_mitigation",
+					AdapterID:             testAdapterIDAlt,
+					CapabilityID:          testCapabilityID,
+					ActionType:            "runtime_action.deny_temporarily_source",
+					BindingID:             "binding.test.nginx-klshield",
+					BindingDigest:         "sha256:binding-nginx-klshield-test",
+					AdapterManifestDigest: "sha256:adapter-manifest-nginx-test",
+					ActionDigest:          "sha256:action-nginx-klshield-test",
+					AllowedTargetScopes:   []string{"source"},
+					MaxTTL:                "2m",
+					Stage:                 "prod",
+					Owner:                 "security-platform",
+					ApprovalRef:           "build.policy.runtime",
 				},
 				{
-					ID:                  "grant.klshield.nginx.runtime.route_mitigation",
-					AdapterID:           testAdapterID,
-					CapabilityID:        testCapabilityIDAlt,
-					ActionType:          "runtime_action.deny_temporarily_source",
-					AllowedTargetScopes: []string{"source"},
-					MaxTTL:              "2m",
-					Stage:               "prod",
-					Owner:               "security-platform",
-					ApprovalRef:         "build.policy.runtime",
+					ID:                    "grant.klshield.nginx.runtime.route_mitigation",
+					AdapterID:             testAdapterID,
+					CapabilityID:          testCapabilityIDAlt,
+					ActionType:            "runtime_action.deny_temporarily_source",
+					BindingID:             "binding.test.klshield-nginx",
+					BindingDigest:         "sha256:binding-klshield-nginx-test",
+					AdapterManifestDigest: "sha256:adapter-manifest-klshield-test",
+					ActionDigest:          "sha256:action-klshield-nginx-test",
+					AllowedTargetScopes:   []string{"source"},
+					MaxTTL:                "2m",
+					Stage:                 "prod",
+					Owner:                 "security-platform",
+					ApprovalRef:           "build.policy.runtime",
 				},
 			},
 			MaxTTL:   "2m",

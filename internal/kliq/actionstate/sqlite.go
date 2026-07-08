@@ -356,6 +356,37 @@ func sqliteMigrations() []sqliteMigration {
 				`CREATE INDEX IF NOT EXISTS audit_spool_record_hash_idx ON audit_spool(record_hash)`,
 			},
 		},
+		{
+			Version: 8,
+			Name:    "baseline_promotion_audit",
+			Statements: []string{
+				`CREATE TABLE IF NOT EXISTS baseline_promotion_decisions (
+					decision_id TEXT PRIMARY KEY,
+					version_id TEXT NOT NULL,
+					previous_version_id TEXT NOT NULL DEFAULT '',
+					action TEXT NOT NULL,
+					approved_by TEXT NOT NULL,
+					approved_at TEXT NOT NULL,
+					reason TEXT NOT NULL,
+					decision_json BLOB NOT NULL
+				)`,
+				`CREATE INDEX IF NOT EXISTS baseline_promotion_decisions_version_idx ON baseline_promotion_decisions(version_id)`,
+			},
+		},
+		{
+			Version: 9,
+			Name:    "runtime_action_provenance",
+			Statements: []string{
+				`ALTER TABLE runtime_action_leases ADD COLUMN binding_id TEXT NOT NULL DEFAULT ''`,
+				`ALTER TABLE runtime_action_leases ADD COLUMN binding_digest TEXT NOT NULL DEFAULT ''`,
+				`ALTER TABLE runtime_action_leases ADD COLUMN adapter_manifest_digest TEXT NOT NULL DEFAULT ''`,
+				`ALTER TABLE runtime_action_leases ADD COLUMN action_digest TEXT NOT NULL DEFAULT ''`,
+				`ALTER TABLE audit_spool ADD COLUMN binding_id TEXT NOT NULL DEFAULT ''`,
+				`ALTER TABLE audit_spool ADD COLUMN binding_digest TEXT NOT NULL DEFAULT ''`,
+				`ALTER TABLE audit_spool ADD COLUMN adapter_manifest_digest TEXT NOT NULL DEFAULT ''`,
+				`ALTER TABLE audit_spool ADD COLUMN action_digest TEXT NOT NULL DEFAULT ''`,
+			},
+		},
 	}
 }
 
@@ -884,9 +915,9 @@ func (s *SQLiteStore) UpsertLease(ctx context.Context, lease RuntimeActionLease)
 	}
 	_, err := s.db.ExecContext(ctx, `INSERT INTO runtime_action_leases (
 		runtime_action_id, plan_id, decision_id, policy_id, bundle_id, source_commit, correlation_id, action_type, target_scope, target_key,
-		ttl, expires_at, reason, audit_id, capability_grant_id, adapter_id, capability_id, mode, required,
-		idempotency_key, created_at, last_reconciled_at, status
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ttl, expires_at, reason, audit_id, capability_grant_id, binding_id, binding_digest, adapter_manifest_digest, action_digest,
+		adapter_id, capability_id, mode, required, idempotency_key, created_at, last_reconciled_at, status
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT(runtime_action_id) DO UPDATE SET
 		last_reconciled_at = excluded.last_reconciled_at,
 		status = excluded.status`,
@@ -905,6 +936,10 @@ func (s *SQLiteStore) UpsertLease(ctx context.Context, lease RuntimeActionLease)
 		lease.Reason,
 		lease.AuditID,
 		lease.CapabilityGrantID,
+		lease.BindingID,
+		lease.BindingDigest,
+		lease.AdapterManifestDigest,
+		lease.ActionDigest,
 		lease.AdapterID,
 		lease.CapabilityID,
 		lease.Mode,
@@ -1022,10 +1057,16 @@ func (s *SQLiteStore) AppendAudit(ctx context.Context, record AuditRecord) error
 	if record.RecordHash == "" {
 		record.RecordHash = auditRecordHash(record)
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO audit_spool (id, runtime_action_id, status, payload, payload_sha256, previous_hash, record_hash, created_at, retry_count, last_attempt_at, uploaded_at, last_error)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	_, err = s.db.ExecContext(ctx, `INSERT INTO audit_spool (
+		id, runtime_action_id, binding_id, binding_digest, adapter_manifest_digest, action_digest,
+		status, payload, payload_sha256, previous_hash, record_hash, created_at, retry_count, last_attempt_at, uploaded_at, last_error
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		record.ID,
 		record.RuntimeActionID,
+		record.BindingID,
+		record.BindingDigest,
+		record.AdapterManifestDigest,
+		record.ActionDigest,
 		record.Status,
 		record.Payload,
 		record.PayloadSHA256,
@@ -1041,7 +1082,7 @@ func (s *SQLiteStore) AppendAudit(ctx context.Context, record AuditRecord) error
 }
 
 func (s *SQLiteStore) PendingAudits(ctx context.Context) ([]AuditRecord, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, runtime_action_id, status, payload, payload_sha256, previous_hash, record_hash, created_at, retry_count, last_attempt_at, uploaded_at, last_error
+	rows, err := s.db.QueryContext(ctx, `SELECT id, runtime_action_id, binding_id, binding_digest, adapter_manifest_digest, action_digest, status, payload, payload_sha256, previous_hash, record_hash, created_at, retry_count, last_attempt_at, uploaded_at, last_error
 		FROM audit_spool WHERE status = ? ORDER BY created_at`, "pending_upload")
 	if err != nil {
 		return nil, err
@@ -1051,7 +1092,7 @@ func (s *SQLiteStore) PendingAudits(ctx context.Context) ([]AuditRecord, error) 
 	for rows.Next() {
 		var record AuditRecord
 		var createdAt, lastAttemptAt, uploadedAt string
-		if err := rows.Scan(&record.ID, &record.RuntimeActionID, &record.Status, &record.Payload, &record.PayloadSHA256, &record.PreviousHash, &record.RecordHash, &createdAt, &record.RetryCount, &lastAttemptAt, &uploadedAt, &record.LastError); err != nil {
+		if err := rows.Scan(&record.ID, &record.RuntimeActionID, &record.BindingID, &record.BindingDigest, &record.AdapterManifestDigest, &record.ActionDigest, &record.Status, &record.Payload, &record.PayloadSHA256, &record.PreviousHash, &record.RecordHash, &createdAt, &record.RetryCount, &lastAttemptAt, &uploadedAt, &record.LastError); err != nil {
 			return nil, err
 		}
 		if record.PayloadSHA256 == "" {
@@ -1092,6 +1133,10 @@ func auditRecordHash(record AuditRecord) string {
 		record.PreviousHash,
 		record.ID,
 		record.RuntimeActionID,
+		record.BindingID,
+		record.BindingDigest,
+		record.AdapterManifestDigest,
+		record.ActionDigest,
 		record.Status,
 		record.PayloadSHA256,
 		formatTime(record.CreatedAt),
@@ -1216,26 +1261,21 @@ func (s *SQLiteStore) SaveBaselineWindow(ctx context.Context, window baseline.Wi
 	return err
 }
 
-func (s *SQLiteStore) SaveBaselineVersion(ctx context.Context, version baseline.VersionRef, stats []baseline.Stats, promote bool) error {
+func (s *SQLiteStore) SaveBaselineVersion(ctx context.Context, version baseline.VersionRef, stats []baseline.Stats) error {
 	if version.VersionID == "" || version.View == "" || version.Entity == "" {
 		return fmt.Errorf("baseline version requires id, view and entity")
 	}
+	if !version.PromotedAt.IsZero() {
+		return fmt.Errorf("baseline version cannot be saved as promoted; use explicit promotion decision")
+	}
 	if version.CreatedAt.IsZero() {
 		version.CreatedAt = time.Now().UTC()
-	}
-	if promote && version.PromotedAt.IsZero() {
-		version.PromotedAt = time.Now().UTC()
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	if promote {
-		if _, err := tx.ExecContext(ctx, `UPDATE baseline_versions SET promoted_at = '' WHERE view = ? AND entity = ?`, version.View, version.Entity); err != nil {
-			return err
-		}
-	}
 	data, err := json.Marshal(version)
 	if err != nil {
 		return err
@@ -1250,7 +1290,7 @@ func (s *SQLiteStore) SaveBaselineVersion(ctx context.Context, version baseline.
 		version.View,
 		version.Entity,
 		formatTime(version.CreatedAt),
-		formatOptionalTime(version.PromotedAt),
+		"",
 		data,
 	); err != nil {
 		return err
@@ -1300,8 +1340,98 @@ func (s *SQLiteStore) SaveBaselineVersion(ctx context.Context, version baseline.
 	return tx.Commit()
 }
 
+func (s *SQLiteStore) PromoteBaselineVersion(ctx context.Context, decision baseline.PromotionDecision) (baseline.VersionRef, error) {
+	if decision.Action == "" {
+		decision.Action = baseline.PromotionActionPromote
+	}
+	if decision.Action != baseline.PromotionActionPromote && decision.Action != baseline.PromotionActionRollback {
+		return baseline.VersionRef{}, fmt.Errorf("baseline promotion requires promote or rollback action")
+	}
+	if err := decision.Validate(); err != nil {
+		return baseline.VersionRef{}, err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return baseline.VersionRef{}, err
+	}
+	defer tx.Rollback()
+	version, err := baselineVersionByIDTx(ctx, tx, decision.VersionID)
+	if err != nil {
+		return baseline.VersionRef{}, err
+	}
+	if decision.PreviousVersionID == "" {
+		if active, ok, err := activeBaselineVersionTx(ctx, tx, version.View, version.Entity); err != nil {
+			return baseline.VersionRef{}, err
+		} else if ok {
+			decision.PreviousVersionID = active.VersionID
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE baseline_versions SET promoted_at = '' WHERE view = ? AND entity = ?`, version.View, version.Entity); err != nil {
+		return baseline.VersionRef{}, err
+	}
+	version.PromotedAt = decision.ApprovedAt.UTC()
+	data, err := json.Marshal(version)
+	if err != nil {
+		return baseline.VersionRef{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE baseline_versions SET promoted_at = ?, version_json = ? WHERE version_id = ?`, formatTime(version.PromotedAt), data, version.VersionID); err != nil {
+		return baseline.VersionRef{}, err
+	}
+	if err := insertBaselinePromotionDecisionTx(ctx, tx, decision); err != nil {
+		return baseline.VersionRef{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return baseline.VersionRef{}, err
+	}
+	return version, nil
+}
+
+func (s *SQLiteStore) RejectBaselineVersion(ctx context.Context, decision baseline.PromotionDecision) error {
+	decision.Action = baseline.PromotionActionReject
+	if err := decision.Validate(); err != nil {
+		return err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := baselineVersionByIDTx(ctx, tx, decision.VersionID); err != nil {
+		return err
+	}
+	if err := insertBaselinePromotionDecisionTx(ctx, tx, decision); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *SQLiteStore) BaselinePromotionDecisions(ctx context.Context) ([]baseline.PromotionDecision, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT decision_json FROM baseline_promotion_decisions ORDER BY approved_at, decision_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var decisions []baseline.PromotionDecision
+	for rows.Next() {
+		var data []byte
+		if err := rows.Scan(&data); err != nil {
+			return nil, err
+		}
+		var decision baseline.PromotionDecision
+		if err := json.Unmarshal(data, &decision); err != nil {
+			return nil, err
+		}
+		decisions = append(decisions, decision)
+	}
+	return decisions, rows.Err()
+}
+
 func (s *SQLiteStore) ActiveBaselineVersion(ctx context.Context, view, entity string) (baseline.VersionRef, bool, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT version_json FROM baseline_versions
+	return activeBaselineVersionTx(ctx, s.db, view, entity)
+}
+
+func activeBaselineVersionTx(ctx context.Context, querier queryRower, view, entity string) (baseline.VersionRef, bool, error) {
+	row := querier.QueryRowContext(ctx, `SELECT version_json FROM baseline_versions
 		WHERE view = ? AND entity = ? AND promoted_at != ''
 		ORDER BY promoted_at DESC LIMIT 1`, view, entity)
 	var data []byte
@@ -1316,6 +1446,42 @@ func (s *SQLiteStore) ActiveBaselineVersion(ctx context.Context, view, entity st
 		return baseline.VersionRef{}, false, err
 	}
 	return version, true, nil
+}
+
+func baselineVersionByIDTx(ctx context.Context, querier queryRower, versionID string) (baseline.VersionRef, error) {
+	row := querier.QueryRowContext(ctx, `SELECT version_json FROM baseline_versions WHERE version_id = ?`, versionID)
+	var data []byte
+	if err := row.Scan(&data); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return baseline.VersionRef{}, ErrNotFound
+		}
+		return baseline.VersionRef{}, err
+	}
+	var version baseline.VersionRef
+	if err := json.Unmarshal(data, &version); err != nil {
+		return baseline.VersionRef{}, err
+	}
+	return version, nil
+}
+
+func insertBaselinePromotionDecisionTx(ctx context.Context, tx *sql.Tx, decision baseline.PromotionDecision) error {
+	data, err := json.Marshal(decision)
+	if err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO baseline_promotion_decisions (
+		decision_id, version_id, previous_version_id, action, approved_by, approved_at, reason, decision_json
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		decision.DecisionID,
+		decision.VersionID,
+		decision.PreviousVersionID,
+		decision.Action,
+		decision.ApprovedBy,
+		formatTime(decision.ApprovedAt),
+		decision.Reason,
+		data,
+	)
+	return err
 }
 
 func (s *SQLiteStore) BaselineStats(ctx context.Context, versionID, metric string) (baseline.Stats, error) {
@@ -1424,9 +1590,14 @@ type rowScanner interface {
 	Scan(dest ...any) error
 }
 
+type queryRower interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
 func leaseColumns() string {
 	return `runtime_action_id, plan_id, decision_id, policy_id, bundle_id, source_commit, correlation_id, action_type, target_scope, target_key,
-		ttl, expires_at, reason, audit_id, capability_grant_id, adapter_id, capability_id, mode, required, idempotency_key, created_at,
+		ttl, expires_at, reason, audit_id, capability_grant_id, binding_id, binding_digest, adapter_manifest_digest, action_digest,
+		adapter_id, capability_id, mode, required, idempotency_key, created_at,
 		last_reconciled_at, status`
 }
 
@@ -1450,6 +1621,10 @@ func scanLease(row rowScanner) (RuntimeActionLease, error) {
 		&lease.Reason,
 		&lease.AuditID,
 		&lease.CapabilityGrantID,
+		&lease.BindingID,
+		&lease.BindingDigest,
+		&lease.AdapterManifestDigest,
+		&lease.ActionDigest,
 		&lease.AdapterID,
 		&lease.CapabilityID,
 		&lease.Mode,
