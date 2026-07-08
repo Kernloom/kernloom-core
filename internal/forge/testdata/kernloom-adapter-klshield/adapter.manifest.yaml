@@ -1,0 +1,17 @@
+adapter_id: kernloom.adapter.klshield
+adapter_version: test
+protocol_version: adapter/v1
+status: stable
+capabilities:
+  - capability_id: enforce.runtime.rate_limit_entity
+    implementation_status: implemented
+    supported_actions:
+      - runtime_action.rate_limit_source
+    implemented_granularities:
+      - granularity.entity
+  - capability_id: enforce.runtime.deny_entity_temporarily
+    implementation_status: implemented
+    supported_actions:
+      - runtime_action.deny_temporarily_source
+    implemented_granularities:
+      - granularity.entity

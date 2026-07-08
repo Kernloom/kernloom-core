@@ -1,0 +1,24 @@
+kind: CapabilityCatalog
+metadata:
+  id: kernloom.core.capability_catalog
+  version: vtest
+spec:
+  capabilities:
+    - id: enforce.runtime.rate_limit_entity
+      kind: enforce_runtime
+      status: stable
+      supported_actions:
+        - runtime_action.rate_limit_entity
+      compatibility_aliases:
+        - runtime_action.rate_limit_source
+      supported_granularities:
+        - granularity.entity
+    - id: enforce.runtime.deny_entity_temporarily
+      kind: enforce_runtime
+      status: stable
+      supported_actions:
+        - runtime_action.deny_entity_temporarily
+      compatibility_aliases:
+        - runtime_action.deny_temporarily_source
+      supported_granularities:
+        - granularity.entity

@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kernloom.dev/schemas/validation-request.schema.json",
+  "title": "Kernloom validation request",
+  "type": "object",
+  "required": ["tenant", "environment", "repo"],
+  "properties": {
+    "tenant": { "type": "string", "minLength": 1 },
+    "environment": { "type": "string", "minLength": 1 },
+    "provider": { "type": "string", "minLength": 1 },
+    "repo": { "type": "string", "minLength": 1 },
+    "commit": { "type": "string" },
+    "pull_request": { "type": "string" },
+    "base_path": { "type": "string" },
+    "target_id": { "type": "string" },
+    "changed_paths": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "config_snapshot": { "type": "string" }
+  },
+  "additionalProperties": false
+}

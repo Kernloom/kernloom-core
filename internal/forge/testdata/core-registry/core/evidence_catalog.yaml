@@ -1,0 +1,7 @@
+kind: EvidenceCatalog
+spec:
+  entries:
+    - id: evidence.runtime_action_applied
+    - id: evidence.runtime_action_readback
+    - id: evidence.runtime_action_revoked
+    - id: evidence.config_conformance

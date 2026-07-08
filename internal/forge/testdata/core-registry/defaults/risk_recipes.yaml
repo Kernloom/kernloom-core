@@ -6,3 +6,10 @@ spec:
       scoring: {}
       thresholds:
         low: score < 40
+    - id: runtime_anomaly.standard
+      output:
+        risk_type: risk_type.runtime_anomaly
+      scoring: {}
+      thresholds:
+        high: score >= 70
+        low: score < 70

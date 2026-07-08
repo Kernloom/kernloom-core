@@ -1,0 +1,6 @@
+kind: PrivilegeCatalog
+spec:
+  entries:
+    - id: privilege.bpf.map.write
+    - id: privilege.bpf.map.read
+    - id: privilege.adapter.runtime_readback

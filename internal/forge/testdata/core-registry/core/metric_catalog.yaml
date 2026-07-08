@@ -1,0 +1,4 @@
+kind: MetricCatalog
+spec:
+  entries:
+    - id: metric.entity_activity

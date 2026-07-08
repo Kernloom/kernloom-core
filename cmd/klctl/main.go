@@ -10,5 +10,5 @@ import (
 )
 
 func main() {
-	ctl.Main("kernloomctl", os.Args[1:])
+	ctl.Main("klctl", os.Args[1:])
 }

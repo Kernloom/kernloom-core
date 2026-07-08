@@ -1,0 +1,6 @@
+resource:
+  id: production_application
+  tenant: kernloom-demo
+  environment: prod
+  type: application
+  owner: security-platform

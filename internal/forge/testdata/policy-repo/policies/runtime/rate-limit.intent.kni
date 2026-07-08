@@ -1,0 +1,28 @@
+intent "runtime.rate-limit" {
+  version = "kni/v0.5"
+  owner   = "security-platform"
+  type    = "runtime_mitigation"
+  target  = "klshield"
+  stage   = "prod"
+
+  profile     = "production.runtime_mitigation"
+  risk_recipe = "runtime_anomaly.standard"
+
+  rule "rate limit abnormal source" {
+    effect   = "rate_limit"
+    subject  = "network source"
+    action   = "connect"
+    resource = "production application"
+
+    only_when = [
+      "device is healthy"
+    ]
+  }
+
+  runtime {
+    allowed   = true
+    actions   = ["rate_limit"]
+    max_ttl   = "10m"
+    max_scope = "application"
+  }
+}

@@ -1,0 +1,4 @@
+kind: SignalCatalog
+spec:
+  entries:
+    - id: signal.runtime_action_state_summary

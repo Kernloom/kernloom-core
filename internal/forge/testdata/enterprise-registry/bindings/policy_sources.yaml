@@ -1,0 +1,34 @@
+kind: PolicySourceIndex
+spec:
+  policy_sources:
+    - id: source.kernloom-demo-klshield-config-prod
+      type: config_repo
+      repo_ref: repo.kernloom-demo-klshield-config
+      tenant_scope: kernloom-demo
+      environment_scope: prod
+      target_scope:
+        - klshield-prod
+      resource_scope:
+        - production_application
+      visibility: platform_team
+      owner: security-platform
+
+    - id: source.kernloom-demo-klshield-policies-prod
+      type: policy_repo
+      repo_ref: repo.enterprise-kernloom-policies
+      tenant_scope: kernloom-demo
+      environment_scope: prod
+      target_scope:
+        - klshield-prod
+      resource_scope:
+        - production_application
+      visibility: restricted
+      owner: security-platform
+      policy_paths:
+        - policies/runtime/rate-limit.intent.kni
+      policy_meanings:
+        - policy_path: policies/runtime/rate-limit.intent.kni
+          canonical_actions:
+            - kernloom_action.runtime_abnormal_source_mitigation
+          action_types:
+            - action_type.runtime_mitigation

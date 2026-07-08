@@ -9,14 +9,23 @@ spec:
     - label: delegation
       canonical_id: policy_type.delegation
       kind: policy_type
+    - label: runtime_mitigation
+      canonical_id: policy_type.runtime_mitigation
+      kind: policy_type
     - label: ziti
       canonical_id: target_system.ziti
+      kind: target_system
+    - label: klshield
+      canonical_id: target_system.klshield
       kind: target_system
     - label: prod
       canonical_id: stage.prod
       kind: stage
     - label: allow
       canonical_id: effect.allow
+      kind: effect
+    - label: rate_limit
+      canonical_id: effect.rate_limit
       kind: effect
     - label: network source
       canonical_id: subject.network_source
@@ -50,3 +59,15 @@ spec:
     - label: application
       canonical_id: scope.application
       kind: scope
+    - label: rate_limit
+      canonical_id: runtime_action.rate_limit_source
+      kind: runtime_action
+    - label: rate_limit_entity
+      canonical_id: runtime_action.rate_limit_entity
+      kind: runtime_action
+    - label: deny_temporarily
+      canonical_id: runtime_action.deny_temporarily_source
+      kind: runtime_action
+    - label: deny_entity_temporarily
+      canonical_id: runtime_action.deny_entity_temporarily
+      kind: runtime_action

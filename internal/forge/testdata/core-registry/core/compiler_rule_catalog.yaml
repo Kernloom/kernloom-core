@@ -1,0 +1,16 @@
+kind: CompilerRuleCatalog
+metadata:
+  id: kernloom.core.compiler_rule_catalog
+  version: vtest
+spec:
+  rules:
+    - id: compiler_rule.runtime_action.rate_limit_source.compat.v1
+      runtime_action: runtime_action.rate_limit_source
+      requirement_id: requirement.runtime_mitigation
+      capability_ids:
+        - enforce.runtime.rate_limit_entity
+    - id: compiler_rule.runtime_action.deny_temporarily_source.compat.v1
+      runtime_action: runtime_action.deny_temporarily_source
+      requirement_id: requirement.runtime_mitigation
+      capability_ids:
+        - enforce.runtime.deny_entity_temporarily
