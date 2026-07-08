@@ -123,6 +123,39 @@ func TestKLIQRunManagedOncePollsAssignmentAndReports(t *testing.T) {
 	}
 }
 
+func TestKLIQProductionOptionsRejectDebugPaths(t *testing.T) {
+	valid := runOptions{
+		Mode:            kliqRunModeManaged,
+		ForgeURL:        "https://forge.example",
+		Production:      true,
+		StatePath:       filepath.Join(t.TempDir(), "state.db"),
+		TrustBundlePath: filepath.Join(t.TempDir(), "trust.json"),
+	}
+	if err := validateKLIQProductionOptions(valid); err != nil {
+		t.Fatalf("expected valid production options, got %v", err)
+	}
+	invalid := valid
+	invalid.Once = true
+	if err := validateKLIQProductionOptions(invalid); err == nil || !strings.Contains(err.Error(), "--once") {
+		t.Fatalf("expected once rejection, got %v", err)
+	}
+	invalid = valid
+	invalid.DecisionSource = "events.json"
+	if err := validateKLIQProductionOptions(invalid); err == nil || !strings.Contains(err.Error(), "decision-source") {
+		t.Fatalf("expected decision source rejection, got %v", err)
+	}
+	invalid = valid
+	invalid.Adapters = []string{"kernloom.adapter.klshield=127.0.0.1:7443"}
+	if err := validateKLIQProductionOptions(invalid); err == nil || !strings.Contains(err.Error(), "adapter") {
+		t.Fatalf("expected adapter flag rejection, got %v", err)
+	}
+	invalid = valid
+	invalid.ForgeURL = "http://forge.example"
+	if err := validateKLIQProductionOptions(invalid); err == nil || !strings.Contains(err.Error(), "plaintext") {
+		t.Fatalf("expected plaintext forge url rejection, got %v", err)
+	}
+}
+
 func TestKLIQRunStandaloneOnceLoadsBundleWithRuntimeCore(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC()
@@ -242,11 +275,10 @@ func TestKLIQDaemonIngestsKLShieldSignalIntoRiskCache(t *testing.T) {
 	}
 	defer store.Close()
 	version := baseline.VersionRef{
-		VersionID:  "baseline_version.active",
-		View:       baseline.ViewEntity,
-		Entity:     "klshield:edge-prod",
-		CreatedAt:  now.Add(-time.Hour),
-		PromotedAt: now.Add(-time.Hour),
+		VersionID: "baseline_version.active",
+		View:      baseline.ViewEntity,
+		Entity:    "klshield:edge-prod",
+		CreatedAt: now.Add(-time.Hour),
 	}
 	if err := store.SaveBaselineVersion(ctx, version, []baseline.Stats{{
 		VersionID:   version.VersionID,
@@ -256,7 +288,17 @@ func TestKLIQDaemonIngestsKLShieldSignalIntoRiskCache(t *testing.T) {
 		Spread:      1,
 		SampleCount: 5,
 		FrozenAt:    now.Add(-time.Hour),
-	}}, true); err != nil {
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PromoteBaselineVersion(ctx, baseline.PromotionDecision{
+		DecisionID: "baseline_promotion.active",
+		VersionID:  version.VersionID,
+		Action:     baseline.PromotionActionPromote,
+		ApprovedBy: "security-platform",
+		ApprovedAt: now.Add(-time.Hour),
+		Reason:     "test active baseline",
+	}); err != nil {
 		t.Fatal(err)
 	}
 	daemon := &runDaemon{

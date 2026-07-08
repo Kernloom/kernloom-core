@@ -32,21 +32,25 @@ type RuntimeActionPlan struct {
 }
 
 type PlannedRuntimeAction struct {
-	ActionID          string
-	AdapterID         string
-	CapabilityID      string
-	CapabilityGrantID string
-	CorrelationID     string
-	Mode              string
-	Required          bool
-	ActionType        string
-	TargetScope       string
-	TargetKey         string
-	TTL               string
-	Reason            string
-	AuditID           string
-	Context           map[string]any
-	DowngradeReason   string
+	ActionID              string
+	AdapterID             string
+	CapabilityID          string
+	CapabilityGrantID     string
+	BindingID             string
+	BindingDigest         string
+	AdapterManifestDigest string
+	ActionDigest          string
+	CorrelationID         string
+	Mode                  string
+	Required              bool
+	ActionType            string
+	TargetScope           string
+	TargetKey             string
+	TTL                   string
+	Reason                string
+	AuditID               string
+	Context               map[string]any
+	DowngradeReason       string
 }
 
 type RuntimeExecutor interface {

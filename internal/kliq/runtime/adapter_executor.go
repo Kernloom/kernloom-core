@@ -32,20 +32,24 @@ func (e AdapterRuntimeExecutor) Execute(ctx context.Context, lease actionstate.R
 		return fmt.Errorf("adapter runtime executor requires client")
 	}
 	resp, err := e.Client.ExecuteRuntimeAction(ctx, &adapterv1.ExecuteRuntimeActionRequest{
-		RuntimeActionId:   lease.RuntimeActionID,
-		IdempotencyKey:    lease.IdempotencyKey,
-		AdapterId:         lease.AdapterID,
-		CapabilityId:      lease.CapabilityID,
-		ActionType:        lease.ActionType,
-		TargetScope:       lease.TargetScope,
-		TargetKey:         lease.TargetKey,
-		Ttl:               lease.TTL,
-		Reason:            lease.Reason,
-		AuditId:           lease.AuditID,
-		SourceCommit:      lease.SourceCommit,
-		CapabilityGrantId: lease.CapabilityGrantID,
-		CorrelationId:     lease.CorrelationID,
-		SignedBundle:      append([]byte(nil), signedBundle...),
+		RuntimeActionId:       lease.RuntimeActionID,
+		IdempotencyKey:        lease.IdempotencyKey,
+		AdapterId:             lease.AdapterID,
+		CapabilityId:          lease.CapabilityID,
+		ActionType:            lease.ActionType,
+		TargetScope:           lease.TargetScope,
+		TargetKey:             lease.TargetKey,
+		Ttl:                   lease.TTL,
+		Reason:                lease.Reason,
+		AuditId:               lease.AuditID,
+		SourceCommit:          lease.SourceCommit,
+		CapabilityGrantId:     lease.CapabilityGrantID,
+		CorrelationId:         lease.CorrelationID,
+		BindingId:             lease.BindingID,
+		BindingDigest:         lease.BindingDigest,
+		AdapterManifestDigest: lease.AdapterManifestDigest,
+		ActionDigest:          lease.ActionDigest,
+		SignedBundle:          append([]byte(nil), signedBundle...),
 	})
 	if err != nil {
 		return err
@@ -65,18 +69,22 @@ func (e AdapterRuntimeExecutor) Cleanup(ctx context.Context, lease actionstate.R
 		return fmt.Errorf("runtime action lease %q does not contain a complete runtime action selector", lease.RuntimeActionID)
 	}
 	resp, err := e.Client.RevokeRuntimeAction(ctx, &adapterv1.RevokeRuntimeActionRequest{
-		IdempotencyKey:    selector.IdempotencyKey,
-		Reason:            "ttl expired",
-		AuditId:           lease.AuditID,
-		RuntimeActionId:   selector.RuntimeActionID,
-		AdapterId:         selector.AdapterID,
-		ActionType:        selector.ActionType,
-		TargetScope:       selector.TargetScope,
-		TargetKey:         selector.TargetKey,
-		SourceCommit:      lease.SourceCommit,
-		CapabilityGrantId: lease.CapabilityGrantID,
-		CapabilityId:      selector.CapabilityID,
-		CorrelationId:     lease.CorrelationID,
+		IdempotencyKey:        selector.IdempotencyKey,
+		Reason:                "ttl expired",
+		AuditId:               lease.AuditID,
+		RuntimeActionId:       selector.RuntimeActionID,
+		AdapterId:             selector.AdapterID,
+		ActionType:            selector.ActionType,
+		TargetScope:           selector.TargetScope,
+		TargetKey:             selector.TargetKey,
+		SourceCommit:          lease.SourceCommit,
+		CapabilityGrantId:     lease.CapabilityGrantID,
+		CapabilityId:          selector.CapabilityID,
+		CorrelationId:         lease.CorrelationID,
+		BindingId:             lease.BindingID,
+		BindingDigest:         lease.BindingDigest,
+		AdapterManifestDigest: lease.AdapterManifestDigest,
+		ActionDigest:          lease.ActionDigest,
 	})
 	if err != nil {
 		return err
@@ -98,14 +106,18 @@ func (e AdapterRuntimeExecutor) State(ctx context.Context, lease actionstate.Run
 		return "", fmt.Errorf("runtime action lease %q does not contain a complete runtime action selector", lease.RuntimeActionID)
 	}
 	resp, err := e.Client.GetRuntimeActionState(ctx, &adapterv1.GetRuntimeActionStateRequest{
-		IdempotencyKey:  selector.IdempotencyKey,
-		RuntimeActionId: selector.RuntimeActionID,
-		AdapterId:       selector.AdapterID,
-		ActionType:      selector.ActionType,
-		TargetScope:     selector.TargetScope,
-		TargetKey:       selector.TargetKey,
-		CapabilityId:    selector.CapabilityID,
-		CorrelationId:   lease.CorrelationID,
+		IdempotencyKey:        selector.IdempotencyKey,
+		RuntimeActionId:       selector.RuntimeActionID,
+		AdapterId:             selector.AdapterID,
+		ActionType:            selector.ActionType,
+		TargetScope:           selector.TargetScope,
+		TargetKey:             selector.TargetKey,
+		CapabilityId:          selector.CapabilityID,
+		CorrelationId:         lease.CorrelationID,
+		BindingId:             lease.BindingID,
+		BindingDigest:         lease.BindingDigest,
+		AdapterManifestDigest: lease.AdapterManifestDigest,
+		ActionDigest:          lease.ActionDigest,
 	})
 	if err != nil {
 		return "", err

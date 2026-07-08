@@ -71,6 +71,7 @@ type runOptions struct {
 	BaselineRiskRecipe        string
 	BaselineMinSamples        int
 	Once                      bool
+	Production                bool
 	Adapters                  []string
 	HTTPClient                *http.Client
 	DevInsecureForgeTransport bool
@@ -128,6 +129,7 @@ func run(args []string) {
 	fs.StringVar(&opts.BaselineRiskRecipe, "baseline-risk-recipe", "runtime_anomaly.standard", "local baseline risk recipe id for adapter signal deviations")
 	fs.IntVar(&opts.BaselineMinSamples, "baseline-min-samples", 5, "minimum clean samples before writing a frozen baseline version")
 	fs.BoolVar(&opts.Once, "once", false, "run one daemon cycle and exit; intended for smoke tests")
+	fs.BoolVar(&opts.Production, "production", false, "enforce production-safe managed daemon gates")
 	fs.Var(&adapters, "adapter", "dev/bootstrap adapter runtime endpoint as adapter_id=host:port; repeatable; managed production should prefer adapter_assignment artifacts")
 	fs.BoolVar(&opts.DevInsecureForgeTransport, "dev-insecure-forge-transport", false, "allow plaintext http Forge transport; dev/smoke only")
 	fs.StringVar(&opts.ForgeTransport.CAPath, "forge-ca", "", "Forge HTTPS CA bundle")
@@ -158,6 +160,11 @@ func run(args []string) {
 func runKLIQ(ctx context.Context, opts runOptions) error {
 	if opts.TrustBundlePath == "" {
 		return fmt.Errorf("kliq run requires --trust-bundle")
+	}
+	if opts.Production {
+		if err := validateKLIQProductionOptions(opts); err != nil {
+			return err
+		}
 	}
 	store, err := actionstate.OpenSQLite(opts.StatePath)
 	if err != nil {
@@ -236,6 +243,34 @@ func runKLIQ(ctx context.Context, opts runOptions) error {
 		return daemon.runOnce(ctx)
 	}
 	return daemon.loop(ctx)
+}
+
+func validateKLIQProductionOptions(opts runOptions) error {
+	if opts.Mode != kliqRunModeManaged {
+		return fmt.Errorf("production KLIQ requires --mode managed")
+	}
+	if opts.Once {
+		return fmt.Errorf("production KLIQ forbids --once")
+	}
+	if opts.DevAllowPrivateKey {
+		return fmt.Errorf("production KLIQ forbids --dev-allow-private-trust-key")
+	}
+	if opts.DevInsecureForgeTransport {
+		return fmt.Errorf("production KLIQ forbids --dev-insecure-forge-transport")
+	}
+	if opts.AdapterTransport.DevInsecureAdapterTransport {
+		return fmt.Errorf("production KLIQ forbids --dev-insecure-adapter-transport")
+	}
+	if strings.TrimSpace(opts.DecisionSource) != "" {
+		return fmt.Errorf("production KLIQ forbids local --decision-source")
+	}
+	if len(opts.Adapters) != 0 {
+		return fmt.Errorf("production KLIQ forbids bootstrap --adapter endpoints; use signed adapter_assignment artifacts")
+	}
+	if err := validateSecureForgeURL(opts.ForgeURL, false); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (d *runDaemon) runOnce(ctx context.Context) error {
@@ -1085,22 +1120,26 @@ type fileRuntimeDecisionSource struct {
 }
 
 type localRuntimeEvent struct {
-	Kind              string `json:"kind,omitempty"`
-	EventID           string `json:"event_id,omitempty"`
-	EventType         string `json:"event_type,omitempty"`
-	SignalID          string `json:"signal_id,omitempty"`
-	RiskType          string `json:"risk_type,omitempty"`
-	AdapterID         string `json:"adapter_id"`
-	CapabilityID      string `json:"capability_id"`
-	CapabilityGrantID string `json:"capability_grant_id"`
-	Mode              string `json:"mode,omitempty"`
-	ActionType        string `json:"action_type"`
-	TargetScope       string `json:"target_scope,omitempty"`
-	TargetKey         string `json:"target_key"`
-	TTL               string `json:"ttl,omitempty"`
-	Reason            string `json:"reason,omitempty"`
-	AuditID           string `json:"audit_id,omitempty"`
-	CorrelationID     string `json:"correlation_id,omitempty"`
+	Kind                  string `json:"kind,omitempty"`
+	EventID               string `json:"event_id,omitempty"`
+	EventType             string `json:"event_type,omitempty"`
+	SignalID              string `json:"signal_id,omitempty"`
+	RiskType              string `json:"risk_type,omitempty"`
+	AdapterID             string `json:"adapter_id"`
+	CapabilityID          string `json:"capability_id"`
+	CapabilityGrantID     string `json:"capability_grant_id"`
+	BindingID             string `json:"binding_id,omitempty"`
+	BindingDigest         string `json:"binding_digest,omitempty"`
+	AdapterManifestDigest string `json:"adapter_manifest_digest,omitempty"`
+	ActionDigest          string `json:"action_digest,omitempty"`
+	Mode                  string `json:"mode,omitempty"`
+	ActionType            string `json:"action_type"`
+	TargetScope           string `json:"target_scope,omitempty"`
+	TargetKey             string `json:"target_key"`
+	TTL                   string `json:"ttl,omitempty"`
+	Reason                string `json:"reason,omitempty"`
+	AuditID               string `json:"audit_id,omitempty"`
+	CorrelationID         string `json:"correlation_id,omitempty"`
 }
 
 func runtimeDecisionSourceFromFile(path string) (*fileRuntimeDecisionSource, error) {
@@ -1175,21 +1214,25 @@ func executeRequestFromLocalRuntimeEvent(event localRuntimeEvent, raw []byte) kl
 		auditID = "audit." + strings.TrimPrefix(redactedHash(decisionID), "sha256:")
 	}
 	return kliqruntime.ExecuteRequest{
-		DecisionID:        decisionID,
-		EventType:         event.EventType,
-		EventID:           eventID,
-		RiskType:          event.RiskType,
-		AdapterID:         event.AdapterID,
-		CapabilityID:      event.CapabilityID,
-		CapabilityGrantID: event.CapabilityGrantID,
-		Mode:              mode,
-		ActionType:        event.ActionType,
-		TargetScope:       event.TargetScope,
-		TargetKey:         event.TargetKey,
-		TTL:               event.TTL,
-		Reason:            reason,
-		AuditID:           auditID,
-		CorrelationID:     event.CorrelationID,
+		DecisionID:            decisionID,
+		EventType:             event.EventType,
+		EventID:               eventID,
+		RiskType:              event.RiskType,
+		AdapterID:             event.AdapterID,
+		CapabilityID:          event.CapabilityID,
+		CapabilityGrantID:     event.CapabilityGrantID,
+		BindingID:             event.BindingID,
+		BindingDigest:         event.BindingDigest,
+		AdapterManifestDigest: event.AdapterManifestDigest,
+		ActionDigest:          event.ActionDigest,
+		Mode:                  mode,
+		ActionType:            event.ActionType,
+		TargetScope:           event.TargetScope,
+		TargetKey:             event.TargetKey,
+		TTL:                   event.TTL,
+		Reason:                reason,
+		AuditID:               auditID,
+		CorrelationID:         event.CorrelationID,
 	}
 }
 

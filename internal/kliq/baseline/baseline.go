@@ -53,6 +53,22 @@ type VersionRef struct {
 	PromotedAt time.Time `json:"promoted_at,omitempty"`
 }
 
+const (
+	PromotionActionPromote  = "promote"
+	PromotionActionReject   = "reject"
+	PromotionActionRollback = "rollback"
+)
+
+type PromotionDecision struct {
+	DecisionID        string    `json:"decision_id"`
+	VersionID         string    `json:"version_id"`
+	PreviousVersionID string    `json:"previous_version_id,omitempty"`
+	Action            string    `json:"action"`
+	ApprovedBy        string    `json:"approved_by"`
+	ApprovedAt        time.Time `json:"approved_at"`
+	Reason            string    `json:"reason"`
+}
+
 type Stats struct {
 	VersionID   string    `json:"version_id"`
 	Key         Key       `json:"key"`
@@ -99,7 +115,7 @@ type Reference interface {
 
 type Store interface {
 	SaveBaselineWindow(ctx context.Context, window Window) error
-	SaveBaselineVersion(ctx context.Context, version VersionRef, stats []Stats, promote bool) error
+	SaveBaselineVersion(ctx context.Context, version VersionRef, stats []Stats) error
 	SaveBaselineDeviation(ctx context.Context, event DeviationEvent) error
 }
 
@@ -113,6 +129,9 @@ type Engine struct {
 }
 
 func (e Engine) LearnWindow(ctx context.Context, samples []Sample, confidence, anomalyFraction float64, clean bool, promote bool) (VersionRef, []Stats, bool, error) {
+	if promote {
+		return VersionRef{}, nil, false, fmt.Errorf("inline baseline promotion requires an explicit approved promotion decision")
+	}
 	if len(samples) == 0 {
 		return VersionRef{}, nil, false, nil
 	}
@@ -172,9 +191,6 @@ func (e Engine) LearnWindow(ctx context.Context, samples []Sample, confidence, a
 		Entity:    key.Entity,
 		CreatedAt: now,
 	}
-	if promote {
-		version.PromotedAt = now
-	}
 	stats := []Stats{{
 		VersionID:   version.VersionID,
 		Key:         key,
@@ -184,10 +200,34 @@ func (e Engine) LearnWindow(ctx context.Context, samples []Sample, confidence, a
 		SampleCount: len(values),
 		FrozenAt:    now,
 	}}
-	if err := e.Store.SaveBaselineVersion(ctx, version, stats, promote); err != nil {
+	if err := e.Store.SaveBaselineVersion(ctx, version, stats); err != nil {
 		return VersionRef{}, nil, false, err
 	}
 	return version, stats, true, nil
+}
+
+func (d PromotionDecision) Validate() error {
+	if strings.TrimSpace(d.DecisionID) == "" {
+		return fmt.Errorf("baseline promotion decision requires decision_id")
+	}
+	if strings.TrimSpace(d.VersionID) == "" {
+		return fmt.Errorf("baseline promotion decision requires version_id")
+	}
+	switch strings.TrimSpace(d.Action) {
+	case PromotionActionPromote, PromotionActionReject, PromotionActionRollback:
+	default:
+		return fmt.Errorf("baseline promotion decision action %q is unsupported", d.Action)
+	}
+	if strings.TrimSpace(d.ApprovedBy) == "" {
+		return fmt.Errorf("baseline promotion decision requires approved_by")
+	}
+	if d.ApprovedAt.IsZero() {
+		return fmt.Errorf("baseline promotion decision requires approved_at")
+	}
+	if strings.TrimSpace(d.Reason) == "" {
+		return fmt.Errorf("baseline promotion decision requires reason")
+	}
+	return nil
 }
 
 func EvaluateSample(sample Sample, stats Stats, now time.Time) (DeviationEvent, bool) {

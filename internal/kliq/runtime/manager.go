@@ -46,6 +46,10 @@ type ExecuteRequest struct {
 	AdapterID                   string `json:"adapter_id"`
 	CapabilityID                string `json:"capability_id"`
 	CapabilityGrantID           string `json:"capability_grant_id"`
+	BindingID                   string `json:"binding_id,omitempty"`
+	BindingDigest               string `json:"binding_digest,omitempty"`
+	AdapterManifestDigest       string `json:"adapter_manifest_digest,omitempty"`
+	ActionDigest                string `json:"action_digest,omitempty"`
 	Mode                        string `json:"mode,omitempty"`
 	ActionType                  string `json:"action_type"`
 	TargetScope                 string `json:"target_scope,omitempty"`
@@ -175,7 +179,7 @@ func assignmentArtifactRecords(activation kliqbundle.ManagedAssignmentActivation
 
 func assignmentArtifactActivationStatus(artifactType string) string {
 	switch artifactType {
-	case "runtime_bundle", "adapter_assignment", "context_route_pack", "conformance_expectation", "trust_bundle", "management_profile", "fallback_profile":
+	case "runtime_bundle", "adapter_manifest", "adapter_assignment", "context_route_pack", "conformance_expectation", "trust_bundle", "management_profile", "fallback_profile":
 		return "activated"
 	default:
 		return "unknown"
@@ -186,6 +190,8 @@ func assignmentArtifactActivationMessage(artifactType string) string {
 	switch artifactType {
 	case "runtime_bundle":
 		return "runtime bundle verified and active"
+	case "adapter_manifest":
+		return "adapter manifest verified and active for approved runtime adapter provenance"
 	case "adapter_assignment":
 		return "adapter assignment validated and available for daemon registry activation"
 	case "context_route_pack":
@@ -626,7 +632,11 @@ func (m Manager) planFromRequest(ctx context.Context, req ExecuteRequest) (Runti
 	if !actionAllowed(runtimeBundle, actionType) {
 		return RuntimeActionPlan{}, nil, fmt.Errorf("runtime action %q is not allowed by bundle %q", actionType, runtimeBundle.Metadata.ID)
 	}
-	if err := validateCapabilityGrant(runtimeBundle, adapterID, capabilityID, actionType, targetScope, capabilityGrantID, ttl, m.now()); err != nil {
+	grant, err := validateCapabilityGrant(runtimeBundle, adapterID, capabilityID, actionType, targetScope, capabilityGrantID, ttl, m.now())
+	if err != nil {
+		return RuntimeActionPlan{}, nil, err
+	}
+	if err := validateRequestedProvenance(req, grant); err != nil {
 		return RuntimeActionPlan{}, nil, err
 	}
 	correlationID := strings.TrimSpace(req.CorrelationID)
@@ -648,19 +658,23 @@ func (m Manager) planFromRequest(ctx context.Context, req ExecuteRequest) (Runti
 		SourceCommit:  runtimeBundle.Metadata.SourceCommit,
 		CorrelationID: correlationID,
 		Actions: []PlannedRuntimeAction{{
-			ActionID:          actionID,
-			AdapterID:         adapterID,
-			CapabilityID:      capabilityID,
-			CapabilityGrantID: capabilityGrantID,
-			CorrelationID:     correlationID,
-			Mode:              mode,
-			Required:          mode == ActionModeRequired,
-			ActionType:        actionType,
-			TargetScope:       targetScope,
-			TargetKey:         targetKey,
-			TTL:               ttlText,
-			Reason:            reason,
-			AuditID:           auditID,
+			ActionID:              actionID,
+			AdapterID:             adapterID,
+			CapabilityID:          capabilityID,
+			CapabilityGrantID:     capabilityGrantID,
+			BindingID:             strings.TrimSpace(grant.BindingID),
+			BindingDigest:         strings.TrimSpace(grant.BindingDigest),
+			AdapterManifestDigest: strings.TrimSpace(grant.AdapterManifestDigest),
+			ActionDigest:          strings.TrimSpace(grant.ActionDigest),
+			CorrelationID:         correlationID,
+			Mode:                  mode,
+			Required:              mode == ActionModeRequired,
+			ActionType:            actionType,
+			TargetScope:           targetScope,
+			TargetKey:             targetKey,
+			TTL:                   ttlText,
+			Reason:                reason,
+			AuditID:               auditID,
 			Context: map[string]any{
 				"target_scope":   targetScope,
 				"target_key":     targetKey,
@@ -929,29 +943,33 @@ func leaseFromPlannedAction(plan RuntimeActionPlan, action PlannedRuntimeAction,
 	ttl, _ := time.ParseDuration(action.TTL)
 	idempotencyKey := idempotencyKey(plan.BundleID, plan.DecisionID, action.AdapterID, action.CapabilityID, action.ActionType, action.TargetScope, action.TargetKey)
 	return actionstate.RuntimeActionLease{
-		RuntimeActionID:   "runtime_action." + shortHash(idempotencyKey),
-		PlanID:            plan.PlanID,
-		DecisionID:        plan.DecisionID,
-		PolicyID:          plan.PolicyID,
-		BundleID:          plan.BundleID,
-		SourceCommit:      plan.SourceCommit,
-		CorrelationID:     plan.CorrelationID,
-		ActionType:        action.ActionType,
-		TargetScope:       action.TargetScope,
-		TargetKey:         action.TargetKey,
-		TTL:               action.TTL,
-		ExpiresAt:         now.Add(ttl).UTC(),
-		Reason:            action.Reason,
-		AuditID:           action.AuditID,
-		CapabilityGrantID: action.CapabilityGrantID,
-		AdapterID:         action.AdapterID,
-		CapabilityID:      action.CapabilityID,
-		Mode:              action.Mode,
-		Required:          action.Required,
-		IdempotencyKey:    idempotencyKey,
-		CreatedAt:         now,
-		LastReconciledAt:  now,
-		Status:            domain.RuntimeActionActive,
+		RuntimeActionID:       "runtime_action." + shortHash(idempotencyKey),
+		PlanID:                plan.PlanID,
+		DecisionID:            plan.DecisionID,
+		PolicyID:              plan.PolicyID,
+		BundleID:              plan.BundleID,
+		SourceCommit:          plan.SourceCommit,
+		CorrelationID:         plan.CorrelationID,
+		ActionType:            action.ActionType,
+		TargetScope:           action.TargetScope,
+		TargetKey:             action.TargetKey,
+		TTL:                   action.TTL,
+		ExpiresAt:             now.Add(ttl).UTC(),
+		Reason:                action.Reason,
+		AuditID:               action.AuditID,
+		CapabilityGrantID:     action.CapabilityGrantID,
+		BindingID:             action.BindingID,
+		BindingDigest:         action.BindingDigest,
+		AdapterManifestDigest: action.AdapterManifestDigest,
+		ActionDigest:          action.ActionDigest,
+		AdapterID:             action.AdapterID,
+		CapabilityID:          action.CapabilityID,
+		Mode:                  action.Mode,
+		Required:              action.Required,
+		IdempotencyKey:        idempotencyKey,
+		CreatedAt:             now,
+		LastReconciledAt:      now,
+		Status:                domain.RuntimeActionActive,
 	}
 }
 
@@ -1222,7 +1240,7 @@ func actionAllowed(runtimeBundle corebundle.RuntimeBundle, actionType string) bo
 	return false
 }
 
-func validateCapabilityGrant(runtimeBundle corebundle.RuntimeBundle, adapterID, capabilityID, actionType, targetScope, grantID string, ttl time.Duration, now time.Time) error {
+func validateCapabilityGrant(runtimeBundle corebundle.RuntimeBundle, adapterID, capabilityID, actionType, targetScope, grantID string, ttl time.Duration, now time.Time) (corebundle.CapabilityGrant, error) {
 	var grant corebundle.CapabilityGrant
 	found := false
 	for _, candidate := range runtimeBundle.Spec.CapabilityGrants {
@@ -1233,39 +1251,50 @@ func validateCapabilityGrant(runtimeBundle corebundle.RuntimeBundle, adapterID, 
 		}
 	}
 	if !found {
-		return fmt.Errorf("capability grant %q is not present in runtime bundle %q", grantID, runtimeBundle.Metadata.ID)
+		return corebundle.CapabilityGrant{}, fmt.Errorf("capability grant %q is not present in runtime bundle %q", grantID, runtimeBundle.Metadata.ID)
 	}
 	if strings.TrimSpace(grant.AdapterID) != adapterID {
-		return fmt.Errorf("capability grant %q adapter_id %q does not match requested adapter %q", grantID, grant.AdapterID, adapterID)
+		return corebundle.CapabilityGrant{}, fmt.Errorf("capability grant %q adapter_id %q does not match requested adapter %q", grantID, grant.AdapterID, adapterID)
 	}
 	if strings.TrimSpace(grant.CapabilityID) != capabilityID {
-		return fmt.Errorf("capability grant %q capability_id %q does not match requested capability %q", grantID, grant.CapabilityID, capabilityID)
+		return corebundle.CapabilityGrant{}, fmt.Errorf("capability grant %q capability_id %q does not match requested capability %q", grantID, grant.CapabilityID, capabilityID)
 	}
 	if strings.TrimSpace(grant.ActionType) != actionType {
-		return fmt.Errorf("capability grant %q action_type %q does not match requested action %q", grantID, grant.ActionType, actionType)
+		return corebundle.CapabilityGrant{}, fmt.Errorf("capability grant %q action_type %q does not match requested action %q", grantID, grant.ActionType, actionType)
 	}
 	if !grantAllowsScope(grant, targetScope) {
-		return fmt.Errorf("target scope %q is not allowed by capability grant %q", targetScope, grantID)
+		return corebundle.CapabilityGrant{}, fmt.Errorf("target scope %q is not allowed by capability grant %q", targetScope, grantID)
 	}
 	if strings.TrimSpace(grant.MaxTTL) != "" {
 		maxTTL, err := parsePositiveDuration(grant.MaxTTL, "capability grant max_ttl")
 		if err != nil {
-			return err
+			return corebundle.CapabilityGrant{}, err
 		}
 		if ttl > maxTTL {
-			return fmt.Errorf("ttl %s exceeds capability grant max_ttl %s", ttl, maxTTL)
+			return corebundle.CapabilityGrant{}, fmt.Errorf("ttl %s exceeds capability grant max_ttl %s", ttl, maxTTL)
 		}
 	}
 	if strings.TrimSpace(grant.ExpiresAt) != "" {
 		expiresAt, err := time.Parse(time.RFC3339, strings.TrimSpace(grant.ExpiresAt))
 		if err != nil {
-			return fmt.Errorf("capability grant %q expires_at is invalid: %w", grantID, err)
+			return corebundle.CapabilityGrant{}, fmt.Errorf("capability grant %q expires_at is invalid: %w", grantID, err)
 		}
 		if !now.UTC().Before(expiresAt.UTC()) {
-			return fmt.Errorf("capability grant %q is expired", grantID)
+			return corebundle.CapabilityGrant{}, fmt.Errorf("capability grant %q is expired", grantID)
 		}
 	}
-	return nil
+	requiredProvenance := map[string]string{
+		"binding_id":              grant.BindingID,
+		"binding_digest":          grant.BindingDigest,
+		"adapter_manifest_digest": grant.AdapterManifestDigest,
+		"action_digest":           grant.ActionDigest,
+	}
+	for field, value := range requiredProvenance {
+		if strings.TrimSpace(value) == "" {
+			return corebundle.CapabilityGrant{}, fmt.Errorf("capability grant %q missing required provenance field %s", grantID, field)
+		}
+	}
+	return grant, nil
 }
 
 func grantAllowsScope(grant corebundle.CapabilityGrant, targetScope string) bool {
@@ -1275,6 +1304,30 @@ func grantAllowsScope(grant corebundle.CapabilityGrant, targetScope string) bool
 		}
 	}
 	return false
+}
+
+func validateRequestedProvenance(req ExecuteRequest, grant corebundle.CapabilityGrant) error {
+	checks := []struct {
+		field     string
+		requested string
+		expected  string
+	}{
+		{field: "binding_id", requested: req.BindingID, expected: grant.BindingID},
+		{field: "binding_digest", requested: req.BindingDigest, expected: grant.BindingDigest},
+		{field: "adapter_manifest_digest", requested: req.AdapterManifestDigest, expected: grant.AdapterManifestDigest},
+		{field: "action_digest", requested: req.ActionDigest, expected: grant.ActionDigest},
+	}
+	for _, check := range checks {
+		requested := strings.TrimSpace(check.requested)
+		if requested == "" {
+			continue
+		}
+		expected := strings.TrimSpace(check.expected)
+		if requested != expected {
+			return fmt.Errorf("requested %s %q does not match runtime bundle grant %q", check.field, requested, expected)
+		}
+	}
+	return nil
 }
 
 func parsePositiveDuration(value, field string) (time.Duration, error) {
@@ -1317,29 +1370,38 @@ func journal(runtimeActionID, event string, status domain.RuntimeActionStatus, m
 
 func audit(lease actionstate.RuntimeActionLease, message string, now time.Time) actionstate.AuditRecord {
 	data, _ := json.Marshal(map[string]string{
-		"runtime_action_id": lease.RuntimeActionID,
-		"plan_id":           lease.PlanID,
-		"decision_id":       lease.DecisionID,
-		"policy_id":         lease.PolicyID,
-		"bundle_id":         lease.BundleID,
-		"source_commit":     lease.SourceCommit,
-		"correlation_id":    lease.CorrelationID,
-		"adapter_id":        lease.AdapterID,
-		"capability_id":     lease.CapabilityID,
-		"mode":              lease.Mode,
-		"action_type":       lease.ActionType,
-		"target_scope":      lease.TargetScope,
-		"audit_id":          lease.AuditID,
-		"status":            string(lease.Status),
-		"message":           message,
-		"expires_at":        lease.ExpiresAt.Format(time.RFC3339Nano),
+		"runtime_action_id":       lease.RuntimeActionID,
+		"plan_id":                 lease.PlanID,
+		"decision_id":             lease.DecisionID,
+		"policy_id":               lease.PolicyID,
+		"bundle_id":               lease.BundleID,
+		"source_commit":           lease.SourceCommit,
+		"correlation_id":          lease.CorrelationID,
+		"adapter_id":              lease.AdapterID,
+		"capability_id":           lease.CapabilityID,
+		"capability_grant_id":     lease.CapabilityGrantID,
+		"binding_id":              lease.BindingID,
+		"binding_digest":          lease.BindingDigest,
+		"adapter_manifest_digest": lease.AdapterManifestDigest,
+		"action_digest":           lease.ActionDigest,
+		"mode":                    lease.Mode,
+		"action_type":             lease.ActionType,
+		"target_scope":            lease.TargetScope,
+		"audit_id":                lease.AuditID,
+		"status":                  string(lease.Status),
+		"message":                 message,
+		"expires_at":              lease.ExpiresAt.Format(time.RFC3339Nano),
 	})
 	return actionstate.AuditRecord{
-		ID:              "audit_spool." + shortHash(lease.RuntimeActionID+string(lease.Status)+message+now.Format(time.RFC3339Nano)),
-		RuntimeActionID: lease.RuntimeActionID,
-		Status:          AuditPendingUpload,
-		Payload:         string(data),
-		PayloadSHA256:   domain.SHA256JSON(data),
-		CreatedAt:       now,
+		ID:                    "audit_spool." + shortHash(lease.RuntimeActionID+string(lease.Status)+message+now.Format(time.RFC3339Nano)),
+		RuntimeActionID:       lease.RuntimeActionID,
+		BindingID:             lease.BindingID,
+		BindingDigest:         lease.BindingDigest,
+		AdapterManifestDigest: lease.AdapterManifestDigest,
+		ActionDigest:          lease.ActionDigest,
+		Status:                AuditPendingUpload,
+		Payload:               string(data),
+		PayloadSHA256:         domain.SHA256JSON(data),
+		CreatedAt:             now,
 	}
 }
