@@ -307,6 +307,8 @@ func expectedArtifactKind(artifactType string) string {
 	switch artifactType {
 	case "runtime_bundle":
 		return "RuntimeBundle"
+	case "adapter_manifest":
+		return "AdapterManifest"
 	case "context_route_pack":
 		return "ContextRoutePack"
 	case "conformance_expectation":

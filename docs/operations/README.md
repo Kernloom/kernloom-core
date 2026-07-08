@@ -13,3 +13,5 @@ Forge production startup must not silently seed management trust. Provision the 
 Production assignment planning requires a signed `PolicyBuildManifest` envelope from the ArtifactStore. The manifest approval must include authority metadata and environment/stage/scope bindings that match the KLIQ registration.
 
 Release pipelines must run formatting, vetting, tests, builds, checksums, SBOM generation, vulnerability scans, provenance generation and signing. Local hooks are `make release-check`, `make sbom`, `make vuln-scan`, `make checksums`, `make release-provenance`, `make release-sign` and `make container-sign IMAGE=...`.
+
+Adapter runtime verification is covered in [Adapter Runtime Verify Runbook](adapter-runtime-verify.md).

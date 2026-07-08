@@ -28,11 +28,19 @@ func main() {
 	tlsKey := fs.String("tls-key", "", "TLS server private key path for remote signer")
 	clientCA := fs.String("client-ca", "", "client CA bundle path; when set, remote signer requires verified client certificates")
 	devInsecureHTTP := fs.Bool("dev-insecure-http", false, "allow plaintext HTTP signer listener; dev/smoke-test only")
+	production := fs.Bool("production", false, "enforce production-safe signer startup gates")
 	keyPath := fs.String("signing-key", "./var/kernloom/signer/management.ed25519.json", "isolated management signing key path")
 	keyID := fs.String("signing-key-id", "forge-management", "management signing key id")
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
+	}
+	if *production {
+		if err := validateSignerProductionConfig(*tlsCert, *tlsKey, *clientCA, *devInsecureHTTP, *keyID); err != nil {
+			slog.Error("forge_signer_production_gate_failed", "error", err.Error())
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
 	}
 	signer, err := signing.LoadOrCreateDevLocalSigner(*keyPath, *keyID)
 	if err != nil {
@@ -97,4 +105,21 @@ func listenAndServeSigner(server *http.Server, useTLS bool, certPath, keyPath st
 		return server.ListenAndServeTLS(certPath, keyPath)
 	}
 	return server.ListenAndServe()
+}
+
+func validateSignerProductionConfig(certPath, keyPath, clientCAPath string, allowDevPlaintext bool, keyID string) error {
+	if strings.TrimSpace(certPath) == "" || strings.TrimSpace(keyPath) == "" {
+		return fmt.Errorf("production forge-signer requires --tls-cert and --tls-key")
+	}
+	if strings.TrimSpace(clientCAPath) == "" {
+		return fmt.Errorf("production forge-signer requires --client-ca for mTLS")
+	}
+	if allowDevPlaintext {
+		return fmt.Errorf("production forge-signer forbids --dev-insecure-http")
+	}
+	normalizedKeyID := strings.ToLower(strings.TrimSpace(keyID))
+	if normalizedKeyID == "" || strings.Contains(normalizedKeyID, "dev") || strings.Contains(normalizedKeyID, "local") {
+		return fmt.Errorf("production forge-signer requires a non-dev signing key id")
+	}
+	return nil
 }
