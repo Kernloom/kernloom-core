@@ -107,6 +107,7 @@ type KLIQAssignment struct {
 	ManifestSigned         bool                   `json:"manifest_signed,omitempty"`
 	ManifestDigest         string                 `json:"manifest_digest,omitempty"`
 	ManifestSignatureValid bool                   `json:"manifest_signature_valid,omitempty"`
+	Provenance             *AssignmentProvenance  `json:"provenance,omitempty"`
 }
 
 type KLIQAssignedArtifact struct {
@@ -115,6 +116,14 @@ type KLIQAssignedArtifact struct {
 	ArtifactRef  string          `json:"artifact_ref,omitempty"`
 	SHA256       string          `json:"sha256"`
 	Envelope     json.RawMessage `json:"envelope"`
+}
+
+type AssignmentProvenance struct {
+	ApprovedBuildID        string            `json:"approved_build_id,omitempty"`
+	ApprovedBuildDigest    string            `json:"approved_build_digest,omitempty"`
+	BindingDigests         map[string]string `json:"binding_digests,omitempty"`
+	RuntimeActionDigests   map[string]string `json:"runtime_action_digests,omitempty"`
+	AdapterManifestDigests map[string]string `json:"adapter_manifest_digests,omitempty"`
 }
 
 type AdapterAssignment struct {
@@ -130,19 +139,20 @@ type AdapterAssignment struct {
 }
 
 type AssignmentManifest struct {
-	Kind              string           `json:"kind"`
-	AssignmentID      string           `json:"assignment_id"`
-	AssignmentVersion int64            `json:"assignment_version"`
-	KLIQID            string           `json:"kliq_id"`
-	Environment       string           `json:"environment"`
-	Stage             string           `json:"stage"`
-	Scope             string           `json:"scope"`
-	SourceCommit      string           `json:"source_commit"`
-	Artifacts         []ArtifactDigest `json:"artifacts"`
-	TrustBundleRef    string           `json:"trust_bundle_ref"`
-	CreatedAt         time.Time        `json:"created_at"`
-	ExpiresAt         time.Time        `json:"expires_at"`
-	ApprovedRollback  bool             `json:"approved_rollback"`
+	Kind              string                `json:"kind"`
+	AssignmentID      string                `json:"assignment_id"`
+	AssignmentVersion int64                 `json:"assignment_version"`
+	KLIQID            string                `json:"kliq_id"`
+	Environment       string                `json:"environment"`
+	Stage             string                `json:"stage"`
+	Scope             string                `json:"scope"`
+	SourceCommit      string                `json:"source_commit"`
+	Artifacts         []ArtifactDigest      `json:"artifacts"`
+	TrustBundleRef    string                `json:"trust_bundle_ref"`
+	CreatedAt         time.Time             `json:"created_at"`
+	ExpiresAt         time.Time             `json:"expires_at"`
+	ApprovedRollback  bool                  `json:"approved_rollback"`
+	Provenance        *AssignmentProvenance `json:"provenance,omitempty"`
 }
 
 type ArtifactDigest struct {
@@ -333,7 +343,7 @@ func RuntimeBundleArtifact(assignment KLIQAssignment) (KLIQAssignedArtifact, boo
 
 func SupportedAssignmentArtifactType(artifactType string) bool {
 	switch artifactType {
-	case "runtime_bundle", "context_route_pack", "conformance_expectation", "adapter_assignment", "trust_bundle", "management_profile", "fallback_profile":
+	case "runtime_bundle", "adapter_manifest", "context_route_pack", "conformance_expectation", "adapter_assignment", "trust_bundle", "management_profile", "fallback_profile":
 		return true
 	default:
 		return false
@@ -377,6 +387,7 @@ func AssignmentManifestFor(assignment KLIQAssignment) AssignmentManifest {
 		CreatedAt:         assignment.CreatedAt,
 		ExpiresAt:         assignment.ExpiresAt,
 		ApprovedRollback:  assignment.ApprovedRollback,
+		Provenance:        assignment.Provenance,
 	}
 	for _, artifact := range assignment.Artifacts {
 		manifest.Artifacts = append(manifest.Artifacts, ArtifactDigest{

@@ -250,6 +250,12 @@ func validateBuildManifestApprovalReadiness(manifest compiler.PolicyBuildManifes
 		manifest.Spec.RiskRecipe.Digest == "" {
 		return fmt.Errorf("build_manifest_missing_provenance")
 	}
+	if err := validateFederatedSourceDigests(manifest); err != nil {
+		return err
+	}
+	if err := validateApprovedBuildSignedAdapterManifests(manifest); err != nil {
+		return err
+	}
 	if len(manifest.Spec.SignedOutputs) == 0 {
 		return fmt.Errorf("build_manifest_missing_signed_outputs")
 	}
@@ -553,6 +559,7 @@ func (s Server) planKLIQAssignment(w http.ResponseWriter, r *http.Request, princ
 		ApprovedRollback:  req.ApprovedRollback,
 		Artifacts:         artifacts,
 		Status:            "active",
+		Provenance:        assignmentProvenanceFromBuild(approvedBuild, req.ApprovedBuildRef),
 	}
 	envelope, err := s.signAndStoreAssignment(r, assignment)
 	if err != nil {
@@ -614,6 +621,15 @@ func (s Server) validateApprovedBuild(r *http.Request, registration domain.KLIQR
 		manifest.Spec.RiskRecipe.Digest == "" {
 		return compiler.PolicyBuildManifest{}, fmt.Errorf("approved_build_missing_provenance")
 	}
+	if err := validateFederatedSourceDigests(manifest); err != nil {
+		return compiler.PolicyBuildManifest{}, err
+	}
+	if err := validateApprovedBuildSignedAdapterManifests(manifest); err != nil {
+		return compiler.PolicyBuildManifest{}, err
+	}
+	if err := validateApprovedBuildRuntimeProvenance(manifest); err != nil {
+		return compiler.PolicyBuildManifest{}, err
+	}
 	if manifest.Metadata.ID == "" {
 		return compiler.PolicyBuildManifest{}, fmt.Errorf("approved_build_missing_id")
 	}
@@ -625,7 +641,93 @@ func (s Server) validateApprovedBuild(r *http.Request, registration domain.KLIQR
 			return compiler.PolicyBuildManifest{}, err
 		}
 	}
+	if err := validateRuntimeBundleAdapterManifestPair(manifest, req.Artifacts); err != nil {
+		return compiler.PolicyBuildManifest{}, err
+	}
 	return manifest, nil
+}
+
+func validateApprovedBuildSignedAdapterManifests(manifest compiler.PolicyBuildManifest) error {
+	for id, adapter := range manifest.Spec.Adapters {
+		if strings.TrimSpace(adapter.ManifestDigest) == "" {
+			return fmt.Errorf("approved_build_missing_adapter_manifest_digest")
+		}
+		if strings.TrimSpace(adapter.ProtocolVersion) == "" {
+			return fmt.Errorf("approved_build_missing_adapter_protocol")
+		}
+		if !completeSignedOutput(adapter.SignedManifest) {
+			return fmt.Errorf("approved_build_missing_signed_adapter_manifest")
+		}
+		if signed, ok := manifest.Spec.SignedOutputs["adapter_manifest:"+id]; ok {
+			if !sameSignedOutputRef(adapter.SignedManifest, signed) {
+				return fmt.Errorf("approved_build_signed_adapter_manifest_mismatch")
+			}
+		}
+	}
+	return nil
+}
+
+func validateApprovedBuildRuntimeProvenance(manifest compiler.PolicyBuildManifest) error {
+	for id, binding := range manifest.Spec.Bindings {
+		if strings.TrimSpace(binding.BindingID) == "" || strings.TrimSpace(binding.Digest) == "" ||
+			strings.TrimSpace(binding.AdapterID) == "" || strings.TrimSpace(binding.CapabilityID) == "" {
+			return fmt.Errorf("approved_build_missing_binding_provenance")
+		}
+		if id != binding.BindingID {
+			return fmt.Errorf("approved_build_binding_id_mismatch")
+		}
+	}
+	for id, action := range manifest.Spec.RuntimeActions {
+		if strings.TrimSpace(action.CapabilityGrantID) == "" || strings.TrimSpace(action.ActionDigest) == "" ||
+			strings.TrimSpace(action.AdapterID) == "" || strings.TrimSpace(action.CapabilityID) == "" ||
+			strings.TrimSpace(action.ActionType) == "" {
+			return fmt.Errorf("approved_build_missing_runtime_action_provenance")
+		}
+		if id != action.CapabilityGrantID {
+			return fmt.Errorf("approved_build_runtime_action_id_mismatch")
+		}
+		if strings.TrimSpace(action.BindingID) == "" {
+			return fmt.Errorf("approved_build_missing_runtime_action_binding")
+		}
+		if _, ok := manifest.Spec.Bindings[action.BindingID]; !ok {
+			return fmt.Errorf("approved_build_runtime_action_binding_unknown")
+		}
+	}
+	return nil
+}
+
+func validateFederatedSourceDigests(manifest compiler.PolicyBuildManifest) error {
+	sources := manifest.Spec.FederatedSourceDigests
+	if len(sources) == 0 {
+		return fmt.Errorf("approved_build_missing_federated_source_digests")
+	}
+	required := map[string]string{
+		"policy_repo":         manifest.Spec.PolicyRepo.ContentDigest,
+		"core_registry":       manifest.Spec.CoreRegistry.ContentDigest,
+		"enterprise_registry": manifest.Spec.EnterpriseRegistry.ContentDigest,
+		"catalog":             manifest.Spec.CatalogDigest,
+		"profile":             manifest.Spec.Profile.Digest,
+		"risk_recipe":         manifest.Spec.RiskRecipe.Digest,
+	}
+	for key, expected := range required {
+		actual := strings.TrimSpace(sources[key])
+		if strings.TrimSpace(expected) == "" || actual == "" {
+			return fmt.Errorf("approved_build_missing_federated_source_digest")
+		}
+		if actual != strings.TrimSpace(expected) {
+			return fmt.Errorf("approved_build_federated_source_digest_mismatch")
+		}
+	}
+	for id, adapter := range manifest.Spec.Adapters {
+		key := "adapter:" + id
+		if strings.TrimSpace(adapter.ManifestDigest) == "" || strings.TrimSpace(sources[key]) == "" {
+			return fmt.Errorf("approved_build_missing_adapter_source_digest")
+		}
+		if strings.TrimSpace(sources[key]) != strings.TrimSpace(adapter.ManifestDigest) {
+			return fmt.Errorf("approved_build_adapter_source_digest_mismatch")
+		}
+	}
+	return nil
 }
 
 func (s Server) verifyApprovedBuildManifestEnvelope(r *http.Request, payload []byte) ([]byte, error) {
@@ -691,6 +793,14 @@ func validateArtifactInApprovedBuild(manifest compiler.PolicyBuildManifest, requ
 	if ref.URI == "" || ref.SHA256 == "" {
 		return fmt.Errorf("invalid_artifact_ref")
 	}
+	if artifactType == "adapter_manifest" {
+		for _, adapter := range manifest.Spec.Adapters {
+			if signedOutputMatchesRef(adapter.SignedManifest, ref) {
+				return nil
+			}
+		}
+		return fmt.Errorf("artifact_not_in_approved_build")
+	}
 	if signed, ok := manifest.Spec.SignedOutputs[artifactType]; ok {
 		if signed.ArtifactRef.URI == ref.URI &&
 			signed.ArtifactRef.SHA256 == ref.SHA256 &&
@@ -707,6 +817,112 @@ func validateArtifactInApprovedBuild(manifest compiler.PolicyBuildManifest, requ
 		return fmt.Errorf("artifact_not_in_approved_build")
 	}
 	return fmt.Errorf("artifact_not_in_approved_build")
+}
+
+func validateRuntimeBundleAdapterManifestPair(manifest compiler.PolicyBuildManifest, requested []domain.KLIQAssignedArtifact) error {
+	if !assignmentRequestsArtifactType(requested, "runtime_bundle") || len(manifest.Spec.RuntimeActions) == 0 {
+		return nil
+	}
+	requiredAdapters := map[string]compiler.AdapterRef{}
+	for _, action := range manifest.Spec.RuntimeActions {
+		adapterID := strings.TrimSpace(action.AdapterID)
+		if adapterID == "" {
+			continue
+		}
+		adapter, ok := manifest.Spec.Adapters[adapterID]
+		if !ok {
+			return fmt.Errorf("approved_build_runtime_action_adapter_unknown")
+		}
+		requiredAdapters[adapterID] = adapter
+	}
+	for adapterID, adapter := range requiredAdapters {
+		found := false
+		for _, artifact := range requested {
+			if strings.TrimSpace(artifact.ArtifactType) != "adapter_manifest" {
+				continue
+			}
+			ref := coreartifact.Ref{URI: strings.TrimSpace(artifact.ArtifactRef), SHA256: strings.TrimSpace(artifact.SHA256)}
+			if signedOutputMatchesRef(adapter.SignedManifest, ref) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("approved_build_missing_adapter_manifest_artifact:%s", adapterID)
+		}
+	}
+	return nil
+}
+
+func assignmentRequestsArtifactType(artifacts []domain.KLIQAssignedArtifact, artifactType string) bool {
+	for _, artifact := range artifacts {
+		if strings.TrimSpace(artifact.ArtifactType) == artifactType {
+			return true
+		}
+	}
+	return false
+}
+
+func completeSignedOutput(signed compiler.SignedOutputRef) bool {
+	return strings.TrimSpace(signed.ArtifactRef.URI) != "" &&
+		strings.TrimSpace(signed.ArtifactRef.SHA256) != "" &&
+		strings.TrimSpace(signed.EnvelopeSHA256) != "" &&
+		strings.TrimSpace(signed.PayloadSHA256) != "" &&
+		strings.TrimSpace(signed.KeyID) != ""
+}
+
+func signedOutputMatchesRef(signed compiler.SignedOutputRef, ref coreartifact.Ref) bool {
+	return strings.TrimSpace(signed.ArtifactRef.URI) == strings.TrimSpace(ref.URI) &&
+		strings.TrimSpace(signed.ArtifactRef.SHA256) == strings.TrimSpace(ref.SHA256) &&
+		strings.TrimSpace(signed.EnvelopeSHA256) == strings.TrimSpace(ref.SHA256) &&
+		strings.TrimSpace(signed.KeyID) != ""
+}
+
+func sameSignedOutputRef(left, right compiler.SignedOutputRef) bool {
+	return strings.TrimSpace(left.ArtifactRef.URI) == strings.TrimSpace(right.ArtifactRef.URI) &&
+		strings.TrimSpace(left.ArtifactRef.SHA256) == strings.TrimSpace(right.ArtifactRef.SHA256) &&
+		strings.TrimSpace(left.EnvelopeSHA256) == strings.TrimSpace(right.EnvelopeSHA256) &&
+		strings.TrimSpace(left.PayloadSHA256) == strings.TrimSpace(right.PayloadSHA256) &&
+		strings.TrimSpace(left.KeyID) == strings.TrimSpace(right.KeyID)
+}
+
+func assignmentProvenanceFromBuild(manifest compiler.PolicyBuildManifest, approvedBuildRef coreartifact.Ref) *domain.AssignmentProvenance {
+	provenance := &domain.AssignmentProvenance{
+		ApprovedBuildID:        manifest.Metadata.ID,
+		ApprovedBuildDigest:    strings.TrimSpace(approvedBuildRef.SHA256),
+		BindingDigests:         map[string]string{},
+		RuntimeActionDigests:   map[string]string{},
+		AdapterManifestDigests: map[string]string{},
+	}
+	for id, binding := range manifest.Spec.Bindings {
+		if strings.TrimSpace(binding.Digest) != "" {
+			provenance.BindingDigests[id] = binding.Digest
+		}
+	}
+	for id, action := range manifest.Spec.RuntimeActions {
+		if strings.TrimSpace(action.ActionDigest) != "" {
+			provenance.RuntimeActionDigests[id] = action.ActionDigest
+		}
+	}
+	for id, adapter := range manifest.Spec.Adapters {
+		if strings.TrimSpace(adapter.ManifestDigest) != "" {
+			provenance.AdapterManifestDigests[id] = adapter.ManifestDigest
+		}
+	}
+	if len(provenance.BindingDigests) == 0 {
+		provenance.BindingDigests = nil
+	}
+	if len(provenance.RuntimeActionDigests) == 0 {
+		provenance.RuntimeActionDigests = nil
+	}
+	if len(provenance.AdapterManifestDigests) == 0 {
+		provenance.AdapterManifestDigests = nil
+	}
+	if provenance.ApprovedBuildID == "" && provenance.ApprovedBuildDigest == "" &&
+		provenance.BindingDigests == nil && provenance.RuntimeActionDigests == nil && provenance.AdapterManifestDigests == nil {
+		return nil
+	}
+	return provenance
 }
 
 func (s Server) resolveAssignmentArtifacts(r *http.Request, req assignmentPlanRequest) ([]domain.KLIQAssignedArtifact, error) {
@@ -807,6 +1023,8 @@ func expectedAssignmentArtifactKind(artifactType string) string {
 	switch strings.TrimSpace(artifactType) {
 	case "runtime_bundle":
 		return "RuntimeBundle"
+	case "adapter_manifest":
+		return "AdapterManifest"
 	case "context_route_pack":
 		return "ContextRoutePack"
 	case "conformance_expectation":

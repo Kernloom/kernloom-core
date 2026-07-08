@@ -222,6 +222,10 @@ func validateManagedAssignmentArtifacts(artifacts []domain.KLIQAssignedArtifact,
 			if err := validateRuntimeBundleArtifact(payload); err != nil {
 				return fmt.Errorf("runtime bundle artifact %q invalid: %w", artifact.ArtifactID, err)
 			}
+		case "adapter_manifest":
+			if err := validateAdapterManifestArtifact(payload); err != nil {
+				return fmt.Errorf("adapter manifest artifact %q invalid: %w", artifact.ArtifactID, err)
+			}
 		case "adapter_assignment":
 			if err := validateAdapterAssignmentArtifact(payload); err != nil {
 				return fmt.Errorf("adapter assignment artifact %q invalid: %w", artifact.ArtifactID, err)
@@ -297,6 +301,59 @@ func validateAdapterAssignmentArtifact(payload []byte) error {
 		return fmt.Errorf("adapter_id is required")
 	case strings.TrimSpace(assignment.Endpoint) == "":
 		return fmt.Errorf("endpoint is required")
+	}
+	return nil
+}
+
+func validateAdapterManifestArtifact(payload []byte) error {
+	var manifest struct {
+		Kind     string `json:"kind"`
+		Metadata struct {
+			ID           string `json:"id"`
+			ArtifactType string `json:"artifact_type"`
+		} `json:"metadata"`
+		Spec struct {
+			AdapterID       string `json:"adapter_id"`
+			AdapterVersion  string `json:"adapter_version"`
+			ProtocolVersion string `json:"protocol_version"`
+			Status          string `json:"status"`
+			Digest          string `json:"digest"`
+			Capabilities    []struct {
+				CapabilityID         string `json:"capability_id"`
+				ImplementationStatus string `json:"implementation_status"`
+			} `json:"capabilities"`
+		} `json:"spec"`
+	}
+	if err := json.Unmarshal(payload, &manifest); err != nil {
+		return err
+	}
+	switch {
+	case manifest.Kind != "AdapterManifest":
+		return fmt.Errorf("kind must be AdapterManifest")
+	case strings.TrimSpace(manifest.Metadata.ID) == "":
+		return fmt.Errorf("metadata.id is required")
+	case strings.TrimSpace(manifest.Metadata.ArtifactType) != "adapter_manifest":
+		return fmt.Errorf("metadata.artifact_type must be adapter_manifest")
+	case strings.TrimSpace(manifest.Spec.AdapterID) == "":
+		return fmt.Errorf("spec.adapter_id is required")
+	case strings.TrimSpace(manifest.Spec.AdapterVersion) == "":
+		return fmt.Errorf("spec.adapter_version is required")
+	case strings.TrimSpace(manifest.Spec.ProtocolVersion) == "":
+		return fmt.Errorf("spec.protocol_version is required")
+	case strings.TrimSpace(manifest.Spec.Status) == "":
+		return fmt.Errorf("spec.status is required")
+	case strings.TrimSpace(manifest.Spec.Digest) == "":
+		return fmt.Errorf("spec.digest is required")
+	case len(manifest.Spec.Capabilities) == 0:
+		return fmt.Errorf("spec.capabilities is required")
+	}
+	for i, capability := range manifest.Spec.Capabilities {
+		if strings.TrimSpace(capability.CapabilityID) == "" {
+			return fmt.Errorf("spec.capabilities[%d].capability_id is required", i)
+		}
+		if strings.TrimSpace(capability.ImplementationStatus) == "" {
+			return fmt.Errorf("spec.capabilities[%d].implementation_status is required", i)
+		}
 	}
 	return nil
 }

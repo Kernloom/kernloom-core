@@ -109,6 +109,36 @@ func TestLoadKLIQServiceTokenSecretPrefersFile(t *testing.T) {
 	}
 }
 
+func TestValidateForgeAPIProductionConfigRequiresRemoteSignerAndNoDevPaths(t *testing.T) {
+	valid := forgeAPIProductionConfig{
+		TLSCert:                  "server.crt",
+		TLSKey:                   "server.key",
+		QueueKind:                "redis",
+		ManagementStoreKind:      "postgres",
+		ManagementPostgresDSN:    "postgres://kernloom",
+		ManagementSignerURL:      "https://signer.example",
+		ArtifactStoreEnvironment: "prod",
+	}
+	if err := validateForgeAPIProductionConfig(valid); err != nil {
+		t.Fatalf("expected valid production config, got %v", err)
+	}
+	invalid := valid
+	invalid.ManagementSignerURL = ""
+	if err := validateForgeAPIProductionConfig(invalid); err == nil || !strings.Contains(err.Error(), "management-signer-url") {
+		t.Fatalf("expected remote signer requirement, got %v", err)
+	}
+	invalid = valid
+	invalid.DevSeedManagementTrust = true
+	if err := validateForgeAPIProductionConfig(invalid); err == nil || !strings.Contains(err.Error(), "dev-seed") {
+		t.Fatalf("expected dev trust seeding rejection, got %v", err)
+	}
+	invalid = valid
+	invalid.ArtifactStoreEnvironment = "dev"
+	if err := validateForgeAPIProductionConfig(invalid); err == nil || !strings.Contains(err.Error(), "non-dev") {
+		t.Fatalf("expected non-dev artifact environment requirement, got %v", err)
+	}
+}
+
 func TestForgeAPITLSConfigRejectsPlaintextWithoutDevFlag(t *testing.T) {
 	if _, _, err := forgeAPITLSConfig("", "", "", false); err == nil || !strings.Contains(err.Error(), "requires --tls-cert") {
 		t.Fatalf("expected plaintext listener to require explicit dev flag, got %v", err)

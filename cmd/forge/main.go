@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -128,6 +129,7 @@ func api(args []string) {
 	tlsKey := fs.String("tls-key", "", "TLS server private key path for Forge API")
 	clientCA := fs.String("client-ca", "", "client CA bundle path; when set, Forge API requires verified client certificates")
 	devInsecureHTTP := fs.Bool("dev-insecure-http", false, "allow plaintext HTTP listener; dev/smoke-test only")
+	production := fs.Bool("production", false, "enforce production-safe startup gates")
 	queueKind := fs.String("queue", "redis", "job queue backend: redis or memory")
 	redisAddr := fs.String("redis-addr", "127.0.0.1:6379", "Redis address")
 	enableDevTokens := fs.Bool("dev-tokens", false, "enable local dev token provider")
@@ -157,6 +159,28 @@ func api(args []string) {
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
+	}
+	if *production {
+		if err := validateForgeAPIProductionConfig(forgeAPIProductionConfig{
+			TLSCert:                       *tlsCert,
+			TLSKey:                        *tlsKey,
+			DevInsecureHTTP:               *devInsecureHTTP,
+			QueueKind:                     *queueKind,
+			EnableDevTokens:               *enableDevTokens,
+			ManagementStoreKind:           *managementStoreKind,
+			ManagementPostgresDSN:         *managementPostgresDSN,
+			DevManagement:                 *devManagement,
+			DevSeedManagementTrust:        *devSeedManagementTrust,
+			ManagementSignerURL:           *managementSignerURL,
+			DevInsecureManagementSigner:   *devInsecureManagementSigner,
+			ArtifactStoreEnvironment:      *artifactStoreEnvironment,
+			DevAllowCLIKLIQServiceSecret:  *devAllowCLIKLIQServiceTokenSecret,
+			KLIQServiceTokenSecretFromArg: *kliqServiceTokenSecret,
+		}); err != nil {
+			logger.Error("forge_api_production_gate_failed", "error", err.Error())
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
 	}
 	store, err := jobStore(*queueKind, *redisAddr)
 	if err != nil {
@@ -313,6 +337,67 @@ func listenAndServeForgeAPI(server *http.Server, useTLS bool, certPath, keyPath 
 		return server.ListenAndServeTLS(certPath, keyPath)
 	}
 	return server.ListenAndServe()
+}
+
+type forgeAPIProductionConfig struct {
+	TLSCert                       string
+	TLSKey                        string
+	DevInsecureHTTP               bool
+	QueueKind                     string
+	EnableDevTokens               bool
+	ManagementStoreKind           string
+	ManagementPostgresDSN         string
+	DevManagement                 bool
+	DevSeedManagementTrust        bool
+	ManagementSignerURL           string
+	DevInsecureManagementSigner   bool
+	ArtifactStoreEnvironment      string
+	DevAllowCLIKLIQServiceSecret  bool
+	KLIQServiceTokenSecretFromArg string
+}
+
+func validateForgeAPIProductionConfig(cfg forgeAPIProductionConfig) error {
+	if strings.TrimSpace(cfg.TLSCert) == "" || strings.TrimSpace(cfg.TLSKey) == "" {
+		return fmt.Errorf("production Forge API requires --tls-cert and --tls-key")
+	}
+	if cfg.DevInsecureHTTP {
+		return fmt.Errorf("production Forge API forbids --dev-insecure-http")
+	}
+	if cfg.EnableDevTokens {
+		return fmt.Errorf("production Forge API forbids --dev-tokens")
+	}
+	if cfg.QueueKind != "redis" {
+		return fmt.Errorf("production Forge API requires --queue redis")
+	}
+	if cfg.ManagementStoreKind != "postgres" || strings.TrimSpace(cfg.ManagementPostgresDSN) == "" {
+		return fmt.Errorf("production Forge API requires --management-store postgres and --management-postgres-dsn")
+	}
+	if cfg.DevManagement {
+		return fmt.Errorf("production Forge API forbids --dev-management")
+	}
+	if cfg.DevSeedManagementTrust {
+		return fmt.Errorf("production Forge API forbids --dev-seed-management-trust")
+	}
+	if strings.TrimSpace(cfg.ManagementSignerURL) == "" {
+		return fmt.Errorf("production Forge API requires --management-signer-url for signer isolation")
+	}
+	parsed, err := url.Parse(strings.TrimSpace(cfg.ManagementSignerURL))
+	if err != nil {
+		return err
+	}
+	if parsed.Scheme != "https" {
+		return fmt.Errorf("production Forge API requires an https remote management signer")
+	}
+	if cfg.DevInsecureManagementSigner {
+		return fmt.Errorf("production Forge API forbids --dev-insecure-management-signer-transport")
+	}
+	if strings.TrimSpace(cfg.ArtifactStoreEnvironment) == "" || strings.TrimSpace(cfg.ArtifactStoreEnvironment) == "dev" {
+		return fmt.Errorf("production Forge API requires a non-dev --artifact-store-env")
+	}
+	if cfg.DevAllowCLIKLIQServiceSecret || strings.TrimSpace(cfg.KLIQServiceTokenSecretFromArg) != "" {
+		return fmt.Errorf("production Forge API forbids argv service-token secrets; use file or environment secret input")
+	}
+	return nil
 }
 
 func loadKLIQServiceTokenSecret(flagValue, filePath string, allowCLI bool) ([]byte, error) {
