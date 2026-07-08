@@ -25,9 +25,11 @@ import (
 	"github.com/kernloom/kernloom-core/internal/core/signing"
 	"github.com/kernloom/kernloom-core/internal/core/version"
 	forgeapi "github.com/kernloom/kernloom-core/internal/forge/api"
+	"github.com/kernloom/kernloom-core/internal/forge/bootstrap"
 	"github.com/kernloom/kernloom-core/internal/forge/compiler"
 	"github.com/kernloom/kernloom-core/internal/forge/jobs"
 	"github.com/kernloom/kernloom-core/internal/forge/management"
+	"github.com/kernloom/kernloom-core/internal/forge/validation"
 	"github.com/kernloom/kernloom-core/internal/storage/artifactstore"
 )
 
@@ -137,6 +139,9 @@ func api(args []string) {
 	oidcAudience := fs.String("oidc-audience", "", "expected JWT audience")
 	oidcHMACSecret := fs.String("oidc-hmac-secret", "", "HS256 secret for local OIDC/OAuth2 JWT verification")
 	oidcRSAPublicKey := fs.String("oidc-rsa-public-key", "", "PEM-encoded RSA public key for RS256 OIDC/OAuth2 JWT verification")
+	oidcJWKSURL := fs.String("oidc-jwks-url", "", "OIDC/OAuth2 JWKS URL for RS256 JWT verification")
+	contextBindings := fs.String("context-bindings", "", "context/principal bindings YAML path for OIDC claim normalization")
+	bootstrapConfig := fs.String("bootstrap-config", "", "Forge bootstrap root YAML path")
 	managementSigningKey := fs.String("management-signing-key", "./var/kernloom/forge/management.ed25519.json", "dev-local signing key for KLIQ assignments")
 	managementSignerURL := fs.String("management-signer-url", "", "remote management signer URL; production path keeps private signing key out of Forge API")
 	managementSignerKeyID := fs.String("management-signer-key-id", "forge-management", "expected management signer key_id for trust bundle validation")
@@ -156,6 +161,9 @@ func api(args []string) {
 	artifactStoreRoot := fs.String("artifact-store-root", "../enterprise-kernloom-policies/generated/artifact-store", "fs artifact store root for approved Forge artifacts")
 	artifactStoreOrg := fs.String("artifact-store-org", "kernloom", "artifact store organization path segment")
 	artifactStoreEnvironment := fs.String("artifact-store-env", "dev", "artifact store environment path segment")
+	validationPolicyRepo := fs.String("policy-repo", "../enterprise-kernloom-policies", "path to enterprise policy repository for validation PDP")
+	validationCoreRegistry := fs.String("core-registry", "../kernloom-core-registry", "path to core registry repository for validation PDP")
+	validationEnterpriseRegistry := fs.String("enterprise-registry", "../enterprise-kernloom-registry", "path to enterprise registry repository for validation PDP")
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
@@ -176,11 +184,27 @@ func api(args []string) {
 			ArtifactStoreEnvironment:      *artifactStoreEnvironment,
 			DevAllowCLIKLIQServiceSecret:  *devAllowCLIKLIQServiceTokenSecret,
 			KLIQServiceTokenSecretFromArg: *kliqServiceTokenSecret,
+			OIDCIssuer:                    *oidcIssuer,
+			OIDCAudience:                  *oidcAudience,
+			OIDCHMACSecret:                *oidcHMACSecret,
+			OIDCRSAPublicKey:              *oidcRSAPublicKey,
+			OIDCJWKSURL:                   *oidcJWKSURL,
+			ContextBindings:               *contextBindings,
+			BootstrapConfig:               *bootstrapConfig,
 		}); err != nil {
 			logger.Error("forge_api_production_gate_failed", "error", err.Error())
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(2)
 		}
+	}
+	if strings.TrimSpace(*bootstrapConfig) != "" {
+		cfg, err := bootstrap.Load(*bootstrapConfig)
+		if err != nil {
+			logger.Error("forge_bootstrap_failed", "error", err.Error())
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
+		logger.Info("forge_bootstrap_loaded", "enterprise_registry_repo", cfg.Forge.Bootstrap.EnterpriseRegistryRepo, "enterprise_registry_ref", cfg.Forge.Bootstrap.EnterpriseRegistryRef)
 	}
 	store, err := jobStore(*queueKind, *redisAddr)
 	if err != nil {
@@ -188,7 +212,7 @@ func api(args []string) {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
-	authenticator, err := authenticator(*enableDevTokens, *oidcIssuer, *oidcAudience, *oidcHMACSecret, *oidcRSAPublicKey)
+	authenticator, err := authenticator(*enableDevTokens, *oidcIssuer, *oidcAudience, *oidcHMACSecret, *oidcRSAPublicKey, *oidcJWKSURL, *contextBindings)
 	if err != nil {
 		logger.Error("forge_authenticator_failed", "error", err.Error())
 		fmt.Fprintln(os.Stderr, err)
@@ -275,6 +299,11 @@ func api(args []string) {
 		Artifacts:      artifactstore.NewFSStore(*artifactStoreRoot, *artifactStoreOrg, *artifactStoreEnvironment),
 		KLIQService:    kliqService,
 		DevManagement:  *devManagement,
+		Validation: validation.CIOptions{
+			PolicyRepo:         *validationPolicyRepo,
+			CoreRegistry:       *validationCoreRegistry,
+			EnterpriseRegistry: *validationEnterpriseRegistry,
+		},
 	}
 	tlsConfig, useTLS, err := forgeAPITLSConfig(*tlsCert, *tlsKey, *clientCA, *devInsecureHTTP)
 	if err != nil {
@@ -354,6 +383,13 @@ type forgeAPIProductionConfig struct {
 	ArtifactStoreEnvironment      string
 	DevAllowCLIKLIQServiceSecret  bool
 	KLIQServiceTokenSecretFromArg string
+	OIDCIssuer                    string
+	OIDCAudience                  string
+	OIDCHMACSecret                string
+	OIDCRSAPublicKey              string
+	OIDCJWKSURL                   string
+	ContextBindings               string
+	BootstrapConfig               string
 }
 
 func validateForgeAPIProductionConfig(cfg forgeAPIProductionConfig) error {
@@ -365,6 +401,30 @@ func validateForgeAPIProductionConfig(cfg forgeAPIProductionConfig) error {
 	}
 	if cfg.EnableDevTokens {
 		return fmt.Errorf("production Forge API forbids --dev-tokens")
+	}
+	if strings.TrimSpace(cfg.OIDCIssuer) == "" || strings.TrimSpace(cfg.OIDCAudience) == "" {
+		return fmt.Errorf("production Forge API requires --oidc-issuer and --oidc-audience")
+	}
+	if strings.TrimSpace(cfg.OIDCHMACSecret) != "" {
+		return fmt.Errorf("production Forge API forbids --oidc-hmac-secret; use RS256 via --oidc-jwks-url or --oidc-rsa-public-key")
+	}
+	if strings.TrimSpace(cfg.OIDCRSAPublicKey) == "" && strings.TrimSpace(cfg.OIDCJWKSURL) == "" {
+		return fmt.Errorf("production Forge API requires --oidc-jwks-url or --oidc-rsa-public-key")
+	}
+	if strings.TrimSpace(cfg.OIDCJWKSURL) != "" {
+		parsedJWKS, err := url.Parse(strings.TrimSpace(cfg.OIDCJWKSURL))
+		if err != nil {
+			return err
+		}
+		if parsedJWKS.Scheme != "https" {
+			return fmt.Errorf("production Forge API requires an https --oidc-jwks-url")
+		}
+	}
+	if strings.TrimSpace(cfg.ContextBindings) == "" {
+		return fmt.Errorf("production Forge API requires --context-bindings")
+	}
+	if strings.TrimSpace(cfg.BootstrapConfig) == "" {
+		return fmt.Errorf("production Forge API requires --bootstrap-config")
 	}
 	if cfg.QueueKind != "redis" {
 		return fmt.Errorf("production Forge API requires --queue redis")
@@ -423,22 +483,43 @@ func loadKLIQServiceTokenSecret(flagValue, filePath string, allowCLI bool) ([]by
 	return nil, nil
 }
 
-func authenticator(enableDevTokens bool, issuer, audience, hmacSecret, rsaPublicKeyPath string) (authn.Chain, error) {
+func authenticator(enableDevTokens bool, issuer, audience, hmacSecret, rsaPublicKeyPath, jwksURL, contextBindingsPath string) (authn.Chain, error) {
 	var chain authn.Chain
 	if enableDevTokens {
 		chain = append(chain, authn.DevTokenVerifier{})
 	}
-	if hmacSecret != "" || rsaPublicKeyPath != "" {
+	if hmacSecret != "" || rsaPublicKeyPath != "" || jwksURL != "" {
 		publicKey, err := loadRSAPublicKey(rsaPublicKeyPath)
 		if err != nil {
 			return nil, err
 		}
-		chain = append(chain, authn.JWTVerifier{
-			Issuer:       issuer,
-			Audience:     audience,
-			HMACSecret:   []byte(hmacSecret),
-			RSAPublicKey: publicKey,
-		})
+		jwksKeys, err := authn.LoadJWKS(context.Background(), jwksURL)
+		if err != nil {
+			return nil, err
+		}
+		contextBindings, err := authn.LoadContextBindings(contextBindingsPath)
+		if err != nil {
+			return nil, err
+		}
+		jwtVerifier := authn.JWTVerifier{
+			Issuer:            issuer,
+			Audience:          audience,
+			HMACSecret:        []byte(hmacSecret),
+			RSAPublicKey:      publicKey,
+			RSAPublicKeys:     jwksKeys,
+			AllowMissingRoles: len(contextBindings) > 0,
+		}
+		if len(contextBindings) != 0 {
+			chain = append(chain, authn.ContextBindingVerifier{
+				Inner:        jwtVerifier,
+				Bindings:     contextBindings,
+				RequireMatch: true,
+			})
+		} else {
+			chain = append(chain, jwtVerifier)
+		}
+	} else if strings.TrimSpace(contextBindingsPath) != "" {
+		return nil, fmt.Errorf("--context-bindings requires an OIDC/JWT verifier")
 	}
 	return chain, nil
 }

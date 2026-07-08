@@ -1,0 +1,31 @@
+context_bindings:
+  - id: example_oidc_security_owner
+    source: oidc
+    issuer: https://idp.example.org
+    audience: kernloom-forge
+    claim: groups
+    contains: kernloom-security-owners
+    maps_to:
+      subject.role: security-owner
+      scope.org: "*"
+      scope.environment: "*"
+
+  - id: example_oidc_platform_operator
+    source: oidc
+    issuer: https://idp.example.org
+    audience: kernloom-forge
+    claim: groups
+    contains: kernloom-platform-operators
+    maps_to:
+      subject.role: operator
+      scope.org: "*"
+      scope.environment: "*"
+
+  - id: example_oidc_mfa
+    source: oidc
+    issuer: https://idp.example.org
+    audience: kernloom-forge
+    claim: amr
+    contains: mfa
+    maps_to:
+      auth.mfa: true

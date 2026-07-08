@@ -123,3 +123,13 @@ func PolicyBuildApproveRoles() []string {
 		RoleBreakGlassApprover,
 	}
 }
+
+func ValidationSubmitRoles() []string {
+	return []string{
+		RolePolicyAuthor,
+		RolePolicyReviewer,
+		RoleSecurityOwner,
+		RolePlatformOwner,
+		RoleOperator,
+	}
+}

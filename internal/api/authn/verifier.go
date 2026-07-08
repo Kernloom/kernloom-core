@@ -103,15 +103,17 @@ func (DevTokenVerifier) Verify(_ context.Context, token string) (Principal, erro
 }
 
 type JWTVerifier struct {
-	Issuer       string
-	Audience     string
-	HMACSecret   []byte
-	RSAPublicKey *rsa.PublicKey
-	Now          func() time.Time
+	Issuer            string
+	Audience          string
+	HMACSecret        []byte
+	RSAPublicKey      *rsa.PublicKey
+	RSAPublicKeys     map[string]*rsa.PublicKey
+	AllowMissingRoles bool
+	Now               func() time.Time
 }
 
 func (v JWTVerifier) Verify(_ context.Context, token string) (Principal, error) {
-	if len(v.HMACSecret) == 0 && v.RSAPublicKey == nil {
+	if len(v.HMACSecret) == 0 && v.RSAPublicKey == nil && len(v.RSAPublicKeys) == 0 {
 		return Principal{}, ErrUnauthenticated
 	}
 	parts := strings.Split(token, ".")
@@ -125,6 +127,7 @@ func (v JWTVerifier) Verify(_ context.Context, token string) (Principal, error) 
 	var header struct {
 		Alg string `json:"alg"`
 		Typ string `json:"typ"`
+		Kid string `json:"kid,omitempty"`
 	}
 	if err := json.Unmarshal(headerBytes, &header); err != nil {
 		return Principal{}, err
@@ -145,11 +148,12 @@ func (v JWTVerifier) Verify(_ context.Context, token string) (Principal, error) 
 			return Principal{}, ErrUnauthenticated
 		}
 	case "RS256":
-		if v.RSAPublicKey == nil {
+		publicKey, err := v.rsaPublicKey(header.Kid)
+		if err != nil {
 			return Principal{}, ErrUnauthenticated
 		}
 		digest := sha256.Sum256(signed)
-		if err := rsa.VerifyPKCS1v15(v.RSAPublicKey, crypto.SHA256, digest[:], actual); err != nil {
+		if err := rsa.VerifyPKCS1v15(publicKey, crypto.SHA256, digest[:], actual); err != nil {
 			return Principal{}, ErrUnauthenticated
 		}
 	default:
@@ -171,7 +175,7 @@ func (v JWTVerifier) Verify(_ context.Context, token string) (Principal, error) 
 		return Principal{}, fmt.Errorf("jwt missing subject")
 	}
 	roles := rolesFromClaims(claims)
-	if len(roles) == 0 {
+	if len(roles) == 0 && !v.AllowMissingRoles {
 		return Principal{}, fmt.Errorf("jwt missing roles")
 	}
 	return Principal{
@@ -180,6 +184,31 @@ func (v JWTVerifier) Verify(_ context.Context, token string) (Principal, error) 
 		Scope:   scopeFromClaims(claims),
 		Claims:  claims,
 	}, nil
+}
+
+func (v JWTVerifier) rsaPublicKey(kid string) (*rsa.PublicKey, error) {
+	kid = strings.TrimSpace(kid)
+	if len(v.RSAPublicKeys) == 0 {
+		if v.RSAPublicKey == nil {
+			return nil, ErrUnauthenticated
+		}
+		return v.RSAPublicKey, nil
+	}
+	if kid != "" {
+		key, ok := v.RSAPublicKeys[kid]
+		if !ok || key == nil {
+			return nil, fmt.Errorf("jwt kid %q is not trusted", kid)
+		}
+		return key, nil
+	}
+	if len(v.RSAPublicKeys) == 1 {
+		for _, key := range v.RSAPublicKeys {
+			if key != nil {
+				return key, nil
+			}
+		}
+	}
+	return nil, fmt.Errorf("jwt kid is required when multiple JWKS keys are configured")
 }
 
 func (v JWTVerifier) validateClaims(claims map[string]any) error {

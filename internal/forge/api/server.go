@@ -14,6 +14,7 @@ import (
 	"github.com/kernloom/kernloom-core/internal/core/signing"
 	"github.com/kernloom/kernloom-core/internal/forge/jobs"
 	"github.com/kernloom/kernloom-core/internal/forge/management"
+	"github.com/kernloom/kernloom-core/internal/forge/validation"
 	"github.com/kernloom/kernloom-core/internal/storage/artifactstore"
 )
 
@@ -26,6 +27,7 @@ type Server struct {
 	Artifacts      artifactstore.ArtifactStore
 	KLIQService    *authn.KLIQServiceTokenIssuer
 	DevManagement  bool
+	Validation     validation.CIOptions
 }
 
 type SimulationJobRequest struct {
@@ -44,6 +46,7 @@ func (s Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/simulation-jobs", s.requireAuth(s.createSimulationJob))
 	mux.HandleFunc("GET /v1/jobs/{id}", s.requireAuth(s.getJob))
 	mux.HandleFunc("POST /v1/policy-build-manifests/approve", s.requireAuth(s.approvePolicyBuildManifest))
+	mux.HandleFunc("POST /v1/validation/ci", s.requireAuth(s.validateCI))
 	mux.HandleFunc("POST /v1/kliq/enrollment-tokens", s.requireAuth(s.createEnrollmentToken))
 	mux.HandleFunc("POST /v1/kliq/enrollment-tokens/{token_id}/revoke", s.requireAuth(s.revokeEnrollmentToken))
 	mux.HandleFunc("POST /v1/kliq/enroll", s.enrollKLIQ)

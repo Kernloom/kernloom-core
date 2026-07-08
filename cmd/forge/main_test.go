@@ -118,6 +118,11 @@ func TestValidateForgeAPIProductionConfigRequiresRemoteSignerAndNoDevPaths(t *te
 		ManagementPostgresDSN:    "postgres://kernloom",
 		ManagementSignerURL:      "https://signer.example",
 		ArtifactStoreEnvironment: "prod",
+		OIDCIssuer:               "https://idp.example",
+		OIDCAudience:             "kernloom-forge",
+		OIDCJWKSURL:              "https://idp.example/jwks.json",
+		ContextBindings:          "/etc/kernloom/context-bindings.yaml",
+		BootstrapConfig:          "/etc/kernloom/bootstrap-root.yaml",
 	}
 	if err := validateForgeAPIProductionConfig(valid); err != nil {
 		t.Fatalf("expected valid production config, got %v", err)
@@ -136,6 +141,26 @@ func TestValidateForgeAPIProductionConfigRequiresRemoteSignerAndNoDevPaths(t *te
 	invalid.ArtifactStoreEnvironment = "dev"
 	if err := validateForgeAPIProductionConfig(invalid); err == nil || !strings.Contains(err.Error(), "non-dev") {
 		t.Fatalf("expected non-dev artifact environment requirement, got %v", err)
+	}
+	invalid = valid
+	invalid.OIDCHMACSecret = "secret"
+	if err := validateForgeAPIProductionConfig(invalid); err == nil || !strings.Contains(err.Error(), "hmac") {
+		t.Fatalf("expected HMAC rejection, got %v", err)
+	}
+	invalid = valid
+	invalid.OIDCJWKSURL = "http://idp.example/jwks.json"
+	if err := validateForgeAPIProductionConfig(invalid); err == nil || !strings.Contains(err.Error(), "https --oidc-jwks-url") {
+		t.Fatalf("expected HTTPS JWKS requirement, got %v", err)
+	}
+	invalid = valid
+	invalid.ContextBindings = ""
+	if err := validateForgeAPIProductionConfig(invalid); err == nil || !strings.Contains(err.Error(), "context-bindings") {
+		t.Fatalf("expected context binding requirement, got %v", err)
+	}
+	invalid = valid
+	invalid.BootstrapConfig = ""
+	if err := validateForgeAPIProductionConfig(invalid); err == nil || !strings.Contains(err.Error(), "bootstrap-config") {
+		t.Fatalf("expected bootstrap config requirement, got %v", err)
 	}
 }
 

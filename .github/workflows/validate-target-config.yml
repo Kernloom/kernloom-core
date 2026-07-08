@@ -1,0 +1,67 @@
+name: Kernloom Target Config Validation
+
+on:
+  workflow_call:
+    inputs:
+      forge_url:
+        required: true
+        type: string
+      tenant:
+        required: true
+        type: string
+      environment:
+        required: true
+        type: string
+      base_path:
+        required: true
+        type: string
+      target_id:
+        required: false
+        type: string
+        default: ""
+      provider:
+        required: false
+        type: string
+        default: github
+      klctl_version:
+        required: false
+        type: string
+        default: main
+    secrets:
+      kernloom_validation_token:
+        required: true
+
+permissions:
+  contents: read
+  id-token: write
+  pull-requests: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+
+      - name: Install klctl
+        run: go install github.com/kernloom/kernloom-core/cmd/klctl@${{ inputs.klctl_version }}
+
+      - name: Validate target config
+        env:
+          KERNLOOM_TOKEN: ${{ secrets.kernloom_validation_token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          klctl validate ci \
+            --forge-url "${{ inputs.forge_url }}" \
+            --tenant "${{ inputs.tenant }}" \
+            --environment "${{ inputs.environment }}" \
+            --provider "${{ inputs.provider }}" \
+            --repo "${{ github.repository }}" \
+            --commit "${{ github.sha }}" \
+            --pull-request "$PR_NUMBER" \
+            --base-path "${{ inputs.base_path }}" \
+            --target-id "${{ inputs.target_id }}" \
+            --output text

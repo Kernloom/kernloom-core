@@ -7,7 +7,7 @@ IMAGE ?=
 
 BINARIES := forge forge-signer forge-worker kliq correlate proof-issuer conformance-worker klctl
 
-.PHONY: fmt vet test build checksums sbom vuln-scan govulncheck release-provenance release-sign container-sign release-promote-check release-check
+.PHONY: fmt vet test build lab-e2e checksums sbom vuln-scan govulncheck release-provenance release-sign container-sign release-promote-check release-check
 
 fmt:
 	$(GO) fmt ./...
@@ -28,6 +28,16 @@ build:
 	$(GO) build -o bin/proof-issuer ./cmd/proof-issuer
 	$(GO) build -o bin/conformance-worker ./cmd/conformance-worker
 	$(GO) build -o bin/klctl ./cmd/klctl
+
+lab-e2e: build
+	@test -n "$(LAB_INVENTORY)" || { echo "LAB_INVENTORY is required"; exit 2; }
+	bin/klctl lab e2e \
+		--inventory "$(LAB_INVENTORY)" \
+		--evidence-dir "$${LAB_EVIDENCE_DIR:-evidence/lab-local}" \
+		--policy-repo "$${POLICY_REPO:-../enterprise-kernloom-policies}" \
+		--core-registry "$${CORE_REGISTRY:-../kernloom-core-registry}" \
+		--enterprise-registry "$${ENTERPRISE_REGISTRY:-../enterprise-kernloom-registry}" \
+		$${KERNLOOM_LAB_ARGS}
 
 checksums: build
 	mkdir -p $(DIST)

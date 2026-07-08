@@ -1,0 +1,8 @@
+forge:
+  bootstrap:
+    enterprise_registry_repo: git@github.com:example-org/enterprise-kernloom-registry.git
+    enterprise_registry_ref: main
+    credential_ref: secret://forge/git/enterprise-registry-readonly
+    trust_anchors:
+      - key_id: enterprise-registry-root-2026
+        purpose: registry_verification
