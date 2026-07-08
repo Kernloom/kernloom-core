@@ -62,25 +62,30 @@ type bundleStatusView struct {
 }
 
 type runtimeActionView struct {
-	RuntimeActionID      string `json:"runtime_action_id"`
-	PlanID               string `json:"plan_id"`
-	DecisionID           string `json:"decision_id"`
-	PolicyID             string `json:"policy_id"`
-	BundleID             string `json:"bundle_id"`
-	SourceCommit         string `json:"source_commit"`
-	CorrelationID        string `json:"correlation_id,omitempty"`
-	AdapterID            string `json:"adapter_id"`
-	CapabilityID         string `json:"capability_id"`
-	Mode                 string `json:"mode"`
-	Required             bool   `json:"required"`
-	ActionType           string `json:"action_type"`
-	TargetScope          string `json:"target_scope"`
-	TargetKeySHA256      string `json:"target_key_sha256"`
-	IdempotencyKeySHA256 string `json:"idempotency_key_sha256"`
-	Status               string `json:"status"`
-	ExpiresAt            string `json:"expires_at"`
-	CreatedAt            string `json:"created_at"`
-	LastReconciledAt     string `json:"last_reconciled_at"`
+	RuntimeActionID       string `json:"runtime_action_id"`
+	PlanID                string `json:"plan_id"`
+	DecisionID            string `json:"decision_id"`
+	PolicyID              string `json:"policy_id"`
+	BundleID              string `json:"bundle_id"`
+	SourceCommit          string `json:"source_commit"`
+	CorrelationID         string `json:"correlation_id,omitempty"`
+	AdapterID             string `json:"adapter_id"`
+	CapabilityID          string `json:"capability_id"`
+	CapabilityGrantID     string `json:"capability_grant_id,omitempty"`
+	BindingID             string `json:"binding_id,omitempty"`
+	BindingDigest         string `json:"binding_digest,omitempty"`
+	AdapterManifestDigest string `json:"adapter_manifest_digest,omitempty"`
+	ActionDigest          string `json:"action_digest,omitempty"`
+	Mode                  string `json:"mode"`
+	Required              bool   `json:"required"`
+	ActionType            string `json:"action_type"`
+	TargetScope           string `json:"target_scope"`
+	TargetKeySHA256       string `json:"target_key_sha256"`
+	IdempotencyKeySHA256  string `json:"idempotency_key_sha256"`
+	Status                string `json:"status"`
+	ExpiresAt             string `json:"expires_at"`
+	CreatedAt             string `json:"created_at"`
+	LastReconciledAt      string `json:"last_reconciled_at"`
 }
 
 type adapterStatusView struct {
@@ -103,13 +108,17 @@ type journalEntryView struct {
 }
 
 type auditRecordView struct {
-	ID              string `json:"id"`
-	RuntimeActionID string `json:"runtime_action_id"`
-	Status          string `json:"status"`
-	PayloadSHA256   string `json:"payload_sha256,omitempty"`
-	PreviousHash    string `json:"previous_hash,omitempty"`
-	RecordHash      string `json:"record_hash,omitempty"`
-	CreatedAt       string `json:"created_at"`
+	ID                    string `json:"id"`
+	RuntimeActionID       string `json:"runtime_action_id"`
+	BindingID             string `json:"binding_id,omitempty"`
+	BindingDigest         string `json:"binding_digest,omitempty"`
+	AdapterManifestDigest string `json:"adapter_manifest_digest,omitempty"`
+	ActionDigest          string `json:"action_digest,omitempty"`
+	Status                string `json:"status"`
+	PayloadSHA256         string `json:"payload_sha256,omitempty"`
+	PreviousHash          string `json:"previous_hash,omitempty"`
+	RecordHash            string `json:"record_hash,omitempty"`
+	CreatedAt             string `json:"created_at"`
 }
 
 type runtimeDecisionView struct {
@@ -248,25 +257,30 @@ func runtimeActionViews(leases []actionstate.RuntimeActionLease) []runtimeAction
 	views := make([]runtimeActionView, 0, len(leases))
 	for _, lease := range leases {
 		views = append(views, runtimeActionView{
-			RuntimeActionID:      lease.RuntimeActionID,
-			PlanID:               lease.PlanID,
-			DecisionID:           lease.DecisionID,
-			PolicyID:             lease.PolicyID,
-			BundleID:             lease.BundleID,
-			SourceCommit:         redactID(lease.SourceCommit),
-			CorrelationID:        redactID(lease.CorrelationID),
-			AdapterID:            lease.AdapterID,
-			CapabilityID:         lease.CapabilityID,
-			Mode:                 lease.Mode,
-			Required:             lease.Required,
-			ActionType:           lease.ActionType,
-			TargetScope:          lease.TargetScope,
-			TargetKeySHA256:      redactedHash(lease.TargetKey),
-			IdempotencyKeySHA256: redactedHash(lease.IdempotencyKey),
-			Status:               string(lease.Status),
-			ExpiresAt:            formatStatusTime(lease.ExpiresAt),
-			CreatedAt:            formatStatusTime(lease.CreatedAt),
-			LastReconciledAt:     formatStatusTime(lease.LastReconciledAt),
+			RuntimeActionID:       lease.RuntimeActionID,
+			PlanID:                lease.PlanID,
+			DecisionID:            lease.DecisionID,
+			PolicyID:              lease.PolicyID,
+			BundleID:              lease.BundleID,
+			SourceCommit:          redactID(lease.SourceCommit),
+			CorrelationID:         redactID(lease.CorrelationID),
+			AdapterID:             lease.AdapterID,
+			CapabilityID:          lease.CapabilityID,
+			CapabilityGrantID:     lease.CapabilityGrantID,
+			BindingID:             lease.BindingID,
+			BindingDigest:         lease.BindingDigest,
+			AdapterManifestDigest: lease.AdapterManifestDigest,
+			ActionDigest:          lease.ActionDigest,
+			Mode:                  lease.Mode,
+			Required:              lease.Required,
+			ActionType:            lease.ActionType,
+			TargetScope:           lease.TargetScope,
+			TargetKeySHA256:       redactedHash(lease.TargetKey),
+			IdempotencyKeySHA256:  redactedHash(lease.IdempotencyKey),
+			Status:                string(lease.Status),
+			ExpiresAt:             formatStatusTime(lease.ExpiresAt),
+			CreatedAt:             formatStatusTime(lease.CreatedAt),
+			LastReconciledAt:      formatStatusTime(lease.LastReconciledAt),
 		})
 	}
 	return views
@@ -344,13 +358,17 @@ func auditRecordViews(records []actionstate.AuditRecord) []auditRecordView {
 	views := make([]auditRecordView, 0, len(records))
 	for _, record := range records {
 		views = append(views, auditRecordView{
-			ID:              record.ID,
-			RuntimeActionID: record.RuntimeActionID,
-			Status:          record.Status,
-			PayloadSHA256:   record.PayloadSHA256,
-			PreviousHash:    record.PreviousHash,
-			RecordHash:      record.RecordHash,
-			CreatedAt:       formatStatusTime(record.CreatedAt),
+			ID:                    record.ID,
+			RuntimeActionID:       record.RuntimeActionID,
+			BindingID:             record.BindingID,
+			BindingDigest:         record.BindingDigest,
+			AdapterManifestDigest: record.AdapterManifestDigest,
+			ActionDigest:          record.ActionDigest,
+			Status:                record.Status,
+			PayloadSHA256:         record.PayloadSHA256,
+			PreviousHash:          record.PreviousHash,
+			RecordHash:            record.RecordHash,
+			CreatedAt:             formatStatusTime(record.CreatedAt),
 		})
 	}
 	return views

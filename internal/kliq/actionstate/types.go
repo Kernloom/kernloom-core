@@ -87,29 +87,33 @@ type LocalTrustBundleRecord struct {
 }
 
 type RuntimeActionLease struct {
-	RuntimeActionID   string
-	PlanID            string
-	DecisionID        string
-	PolicyID          string
-	BundleID          string
-	SourceCommit      string
-	CorrelationID     string
-	ActionType        string
-	TargetScope       string
-	TargetKey         string
-	TTL               string
-	ExpiresAt         time.Time
-	Reason            string
-	AuditID           string
-	CapabilityGrantID string
-	AdapterID         string
-	CapabilityID      string
-	Mode              string
-	Required          bool
-	IdempotencyKey    string
-	CreatedAt         time.Time
-	LastReconciledAt  time.Time
-	Status            domain.RuntimeActionStatus
+	RuntimeActionID       string
+	PlanID                string
+	DecisionID            string
+	PolicyID              string
+	BundleID              string
+	SourceCommit          string
+	CorrelationID         string
+	ActionType            string
+	TargetScope           string
+	TargetKey             string
+	TTL                   string
+	ExpiresAt             time.Time
+	Reason                string
+	AuditID               string
+	CapabilityGrantID     string
+	BindingID             string
+	BindingDigest         string
+	AdapterManifestDigest string
+	ActionDigest          string
+	AdapterID             string
+	CapabilityID          string
+	Mode                  string
+	Required              bool
+	IdempotencyKey        string
+	CreatedAt             time.Time
+	LastReconciledAt      time.Time
+	Status                domain.RuntimeActionStatus
 }
 
 type RuntimeActionSelector struct {
@@ -192,18 +196,22 @@ type JournalEntry struct {
 }
 
 type AuditRecord struct {
-	ID              string
-	RuntimeActionID string
-	Status          string
-	Payload         string
-	PayloadSHA256   string
-	PreviousHash    string
-	RecordHash      string
-	CreatedAt       time.Time
-	RetryCount      int
-	LastAttemptAt   time.Time
-	UploadedAt      time.Time
-	LastError       string
+	ID                    string
+	RuntimeActionID       string
+	BindingID             string
+	BindingDigest         string
+	AdapterManifestDigest string
+	ActionDigest          string
+	Status                string
+	Payload               string
+	PayloadSHA256         string
+	PreviousHash          string
+	RecordHash            string
+	CreatedAt             time.Time
+	RetryCount            int
+	LastAttemptAt         time.Time
+	UploadedAt            time.Time
+	LastError             string
 }
 
 type RuntimeDecisionRecord struct {
@@ -253,7 +261,10 @@ type Store interface {
 	AppendRuntimeDecision(ctx context.Context, record RuntimeDecisionRecord) error
 	RuntimeDecisions(ctx context.Context, limit int) ([]RuntimeDecisionRecord, error)
 	SaveBaselineWindow(ctx context.Context, window baseline.Window) error
-	SaveBaselineVersion(ctx context.Context, version baseline.VersionRef, stats []baseline.Stats, promote bool) error
+	SaveBaselineVersion(ctx context.Context, version baseline.VersionRef, stats []baseline.Stats) error
+	PromoteBaselineVersion(ctx context.Context, decision baseline.PromotionDecision) (baseline.VersionRef, error)
+	RejectBaselineVersion(ctx context.Context, decision baseline.PromotionDecision) error
+	BaselinePromotionDecisions(ctx context.Context) ([]baseline.PromotionDecision, error)
 	ActiveBaselineVersion(ctx context.Context, view, entity string) (baseline.VersionRef, bool, error)
 	BaselineStats(ctx context.Context, versionID, metric string) (baseline.Stats, error)
 	SaveBaselineDeviation(ctx context.Context, event baseline.DeviationEvent) error

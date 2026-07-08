@@ -257,9 +257,19 @@ func TestSQLiteBaselineAndRiskCacheUnknownOnStale(t *testing.T) {
 	}
 	defer store.Close()
 	now := time.Now().UTC()
-	version := baseline.VersionRef{VersionID: "baseline_version.test", View: baseline.ViewEntity, Entity: "opaque", CreatedAt: now, PromotedAt: now}
+	version := baseline.VersionRef{VersionID: "baseline_version.test", View: baseline.ViewEntity, Entity: "opaque", CreatedAt: now}
 	stats := baseline.Stats{VersionID: version.VersionID, Key: baseline.Key{View: version.View, Entity: version.Entity}, Metric: "metric", Center: 10, Spread: 1, SampleCount: 5, FrozenAt: now}
-	if err := store.SaveBaselineVersion(ctx, version, []baseline.Stats{stats}, true); err != nil {
+	if err := store.SaveBaselineVersion(ctx, version, []baseline.Stats{stats}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PromoteBaselineVersion(ctx, baseline.PromotionDecision{
+		DecisionID: "baseline_promotion.approve",
+		VersionID:  version.VersionID,
+		Action:     baseline.PromotionActionPromote,
+		ApprovedBy: "security-platform",
+		ApprovedAt: now,
+		Reason:     "approved clean baseline for runtime risk",
+	}); err != nil {
 		t.Fatal(err)
 	}
 	active, ok, err := store.ActiveBaselineVersion(ctx, baseline.ViewEntity, "opaque")
@@ -293,5 +303,67 @@ func TestSQLiteBaselineAndRiskCacheUnknownOnStale(t *testing.T) {
 	}
 	if stale.Tier != corerisk.TierUnknown {
 		t.Fatalf("expected stale risk to become unknown, got %#v", stale)
+	}
+}
+
+func TestSQLiteBaselinePromotionRejectAndRollbackAreAudited(t *testing.T) {
+	ctx := context.Background()
+	store, err := OpenSQLite(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Date(2026, 7, 7, 10, 0, 0, 0, time.UTC)
+	v1 := baseline.VersionRef{VersionID: "baseline_version.v1", View: baseline.ViewEntity, Entity: "opaque", CreatedAt: now.Add(-2 * time.Hour)}
+	v2 := baseline.VersionRef{VersionID: "baseline_version.v2", View: baseline.ViewEntity, Entity: "opaque", CreatedAt: now.Add(-time.Hour)}
+	stats1 := baseline.Stats{VersionID: v1.VersionID, Key: baseline.Key{View: v1.View, Entity: v1.Entity}, Metric: "metric", Center: 10, Spread: 1, SampleCount: 5, FrozenAt: v1.CreatedAt}
+	stats2 := baseline.Stats{VersionID: v2.VersionID, Key: baseline.Key{View: v2.View, Entity: v2.Entity}, Metric: "metric", Center: 20, Spread: 2, SampleCount: 5, FrozenAt: v2.CreatedAt}
+	if err := store.SaveBaselineVersion(ctx, v1, []baseline.Stats{stats1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveBaselineVersion(ctx, v2, []baseline.Stats{stats2}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := store.ActiveBaselineVersion(ctx, baseline.ViewEntity, "opaque"); err != nil || ok {
+		t.Fatalf("expected frozen versions to be inactive before promotion, ok=%t err=%v", ok, err)
+	}
+	if err := store.RejectBaselineVersion(ctx, baseline.PromotionDecision{
+		DecisionID: "baseline_promotion.reject_v2",
+		VersionID:  v2.VersionID,
+		ApprovedBy: "security-platform",
+		ApprovedAt: now,
+		Reason:     "window overlaps maintenance activity",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := store.ActiveBaselineVersion(ctx, baseline.ViewEntity, "opaque"); err != nil || ok {
+		t.Fatalf("expected rejected version to stay inactive, ok=%t err=%v", ok, err)
+	}
+	if active, err := store.PromoteBaselineVersion(ctx, baseline.PromotionDecision{
+		DecisionID: "baseline_promotion.promote_v1",
+		VersionID:  v1.VersionID,
+		Action:     baseline.PromotionActionPromote,
+		ApprovedBy: "security-platform",
+		ApprovedAt: now.Add(time.Minute),
+		Reason:     "approved clean baseline",
+	}); err != nil || active.VersionID != v1.VersionID {
+		t.Fatalf("expected v1 promotion, active=%#v err=%v", active, err)
+	}
+	if active, err := store.PromoteBaselineVersion(ctx, baseline.PromotionDecision{
+		DecisionID: "baseline_promotion.rollback_v1",
+		VersionID:  v1.VersionID,
+		Action:     baseline.PromotionActionRollback,
+		ApprovedBy: "security-platform",
+		ApprovedAt: now.Add(2 * time.Minute),
+		Reason:     "rollback to last known clean baseline",
+	}); err != nil || active.VersionID != v1.VersionID {
+		t.Fatalf("expected rollback to v1, active=%#v err=%v", active, err)
+	}
+	decisions, err := store.BaselinePromotionDecisions(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(decisions) != 3 {
+		t.Fatalf("expected three audited decisions, got %#v", decisions)
 	}
 }

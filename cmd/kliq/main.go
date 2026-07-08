@@ -93,8 +93,8 @@ func main() {
 	fmt.Println("  kliq enroll --forge http://127.0.0.1:8080 --dev-insecure-forge-transport --enrollment-token token --node-id node --environment env --stage stage --scope scope [--state ./var/kernloom/kliq/state.db]")
 	fmt.Println("  kliq verify-bundle --bundle path --trust-bundle path")
 	fmt.Println("  kliq load-bundle --bundle path --trust-bundle path [--state ./var/kernloom/kliq/state.db]")
-	fmt.Println("  kliq load-managed-bundle --assignment-url http://127.0.0.1:8080 --dev-insecure-forge-transport --bearer-token token --kliq-id id --environment env --stage stage --scope scope --trust-key-id key --trust-bundle path [--state ./var/kernloom/kliq/state.db]")
-	fmt.Println("  kliq execute-action --trust-bundle path --adapter-id id --adapter-addr host:port --capability-id id --capability-grant-id id --decision-id id --action-type id --target-key value --reason text [--audit-id id|--derive-audit-id] [--state path] [--target-scope scope] [--ttl 1m] [--mode required] [--correlation-id id] [--adapter-ca ca.pem --adapter-client-cert cert.pem --adapter-client-key key.pem]")
+	fmt.Println("  kliq load-managed-bundle --dev-debug-load-managed-bundle --assignment-url http://127.0.0.1:8080 --dev-insecure-forge-transport --bearer-token token --kliq-id id --environment env --stage stage --scope scope --trust-key-id key --trust-bundle path [--state ./var/kernloom/kliq/state.db]")
+	fmt.Println("  kliq execute-action --dev-debug-execute-action --trust-bundle path --adapter-id id --adapter-addr host:port --capability-id id --capability-grant-id id --decision-id id --action-type id --target-key value --reason text [--audit-id id|--derive-audit-id] [--state path] [--target-scope scope] [--ttl 1m] [--mode required] [--correlation-id id] [--adapter-ca ca.pem --adapter-client-cert cert.pem --adapter-client-key key.pem]")
 	fmt.Println("  kliq reconcile --trust-bundle path --adapter-id id --adapter-addr host:port [--state ./var/kernloom/kliq/state.db] [--dry-run] [--adapter-ca ca.pem --adapter-client-cert cert.pem --adapter-client-key key.pem]")
 	fmt.Println("  kliq status [--state ./var/kernloom/kliq/state.db]")
 	fmt.Println("  kliq bundle status [--state ./var/kernloom/kliq/state.db]")
@@ -182,6 +182,7 @@ func loadManagedBundle(args []string) {
 	trustBundlePath := fs.String("trust-bundle", defaultTrustBundlePath, "path to public trust bundle")
 	devAllowPrivateTrustKey := fs.Bool("dev-allow-private-trust-key", false, "allow dev-local key files containing private material; never use in production")
 	devInsecureForgeTransport := fs.Bool("dev-insecure-forge-transport", false, "allow plaintext http Forge transport; dev/smoke only")
+	devDebugLoadManagedBundle := fs.Bool("dev-debug-load-managed-bundle", false, "enable manual managed assignment pull; debug/smoke only")
 	forgeTransport := forgeTransportOptions{}
 	fs.StringVar(&forgeTransport.CAPath, "forge-ca", "", "Forge HTTPS CA bundle")
 	fs.StringVar(&forgeTransport.ClientCertPath, "forge-client-cert", "", "Forge mTLS client certificate")
@@ -191,6 +192,10 @@ func loadManagedBundle(args []string) {
 	statePath := fs.String("state", defaultStatePath, "path to KLIQ local SQLite state")
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	if !*devDebugLoadManagedBundle {
+		fmt.Fprintln(os.Stderr, "kliq load-managed-bundle is debug/smoke only; pass --dev-debug-load-managed-bundle")
 		os.Exit(2)
 	}
 	if *assignmentURL == "" || *bearerToken == "" || *kliqID == "" || *environment == "" || *stage == "" || *scope == "" || *trustKeyID == "" {
@@ -273,6 +278,10 @@ func executeAction(args []string) {
 	adapterAddr := fs.String("adapter-addr", "", "runtime adapter gRPC address")
 	capabilityID := fs.String("capability-id", "", "adapter capability id")
 	capabilityGrantID := fs.String("capability-grant-id", "", "approved capability grant id")
+	bindingID := fs.String("binding-id", "", "approved binding id")
+	bindingDigest := fs.String("binding-digest", "", "approved binding digest")
+	adapterManifestDigest := fs.String("adapter-manifest-digest", "", "approved adapter manifest digest")
+	actionDigest := fs.String("action-digest", "", "approved runtime action digest")
 	decisionID := fs.String("decision-id", "", "runtime decision id")
 	mode := fs.String("mode", kliqruntime.ActionModeRequired, "runtime action mode: required|optional|fallback|any_of")
 	actionType := fs.String("action-type", "", "runtime action type or canonical id")
@@ -283,6 +292,7 @@ func executeAction(args []string) {
 	auditID := fs.String("audit-id", "", "audit id")
 	correlationID := fs.String("correlation-id", "", "correlation id for runtime logs, adapter requests and evidence")
 	deriveAuditID := fs.Bool("derive-audit-id", false, "derive audit id from non-empty decision id")
+	devDebugExecuteAction := fs.Bool("dev-debug-execute-action", false, "enable manual runtime execution; debug/smoke only")
 	adapterTransport := adapterTransportOptions{}
 	fs.BoolVar(&adapterTransport.DevInsecureAdapterTransport, "dev-insecure-adapter-transport", false, "allow plaintext adapter gRPC transport; dev/smoke only")
 	fs.StringVar(&adapterTransport.CAPath, "adapter-ca", "", "adapter mTLS CA bundle")
@@ -292,6 +302,10 @@ func executeAction(args []string) {
 	fs.StringVar(&adapterTransport.ServerCertificateSHA256, "adapter-server-cert-sha256", "", "expected adapter leaf certificate SHA-256 pin")
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	if !*devDebugExecuteAction {
+		fmt.Fprintln(os.Stderr, "kliq execute-action is debug/smoke only; pass --dev-debug-execute-action")
 		os.Exit(2)
 	}
 	if *trustBundlePath == "" || *adapterID == "" || *adapterAddr == "" || *capabilityID == "" || *capabilityGrantID == "" || *decisionID == "" || *actionType == "" || *targetKey == "" || *reason == "" {
@@ -311,6 +325,10 @@ func executeAction(args []string) {
 		AdapterID:                   *adapterID,
 		CapabilityID:                *capabilityID,
 		CapabilityGrantID:           *capabilityGrantID,
+		BindingID:                   *bindingID,
+		BindingDigest:               *bindingDigest,
+		AdapterManifestDigest:       *adapterManifestDigest,
+		ActionDigest:                *actionDigest,
 		Mode:                        *mode,
 		ActionType:                  *actionType,
 		TargetScope:                 *targetScope,
