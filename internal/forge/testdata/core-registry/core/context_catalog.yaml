@@ -1,0 +1,5 @@
+kind: ContextCatalog
+spec:
+  entries:
+    - id: context.runtime_action.selector
+    - id: context.validation.source_snapshot

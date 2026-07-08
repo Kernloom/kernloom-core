@@ -1,0 +1,7 @@
+kind: EventCatalog
+spec:
+  entries:
+    - id: event.runtime_action_applied
+    - id: event.runtime_action_readback
+    - id: event.runtime_action_revoked
+    - id: event.config_conformance_observed

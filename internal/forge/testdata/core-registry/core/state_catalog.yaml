@@ -1,0 +1,5 @@
+kind: StateCatalog
+spec:
+  entries:
+    - id: state.runtime_action
+    - id: state.overlay_service_policy

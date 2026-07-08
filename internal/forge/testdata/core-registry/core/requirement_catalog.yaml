@@ -1,0 +1,5 @@
+kind: RequirementCatalog
+spec:
+  entries:
+    - id: requirement.runtime_mitigation
+    - id: requirement.overlay_config_validation

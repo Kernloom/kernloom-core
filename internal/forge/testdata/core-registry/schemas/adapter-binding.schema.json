@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kernloom.dev/schemas/adapter-binding.schema.json",
+  "title": "Kernloom adapter binding",
+  "type": "object",
+  "required": ["kind", "spec"],
+  "properties": {
+    "kind": { "enum": ["AdapterBindingSet"] },
+    "metadata": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "version": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "spec": {
+      "type": "object",
+      "required": ["bindings"],
+      "properties": {
+        "bindings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["capability_id", "adapter_id", "implementation_status"],
+            "properties": {
+              "binding_id": { "type": "string", "minLength": 1 },
+              "digest": { "type": "string", "minLength": 1 },
+              "capability_id": { "type": "string", "minLength": 1 },
+              "adapter_id": { "type": "string", "minLength": 1 },
+              "environments": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+              "stages": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+              "implementation_status": { "enum": ["implemented", "planned", "experimental"] },
+              "required_grant_profile": { "type": "string", "minLength": 1 }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

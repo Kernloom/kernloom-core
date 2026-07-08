@@ -1,0 +1,5 @@
+kind: ComponentRoleCatalog
+spec:
+  entries:
+    - id: component_role.adapter
+    - id: component_role.kliq

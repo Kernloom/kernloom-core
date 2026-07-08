@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kernloom.dev/schemas/authoring-catalog.schema.json",
+  "title": "Kernloom authoring catalog",
+  "type": "object",
+  "required": ["kind", "spec"],
+  "properties": {
+    "kind": { "enum": ["AuthoringCatalog"] },
+    "metadata": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "version": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "spec": {
+      "type": "object",
+      "required": ["values"],
+      "properties": {
+        "values": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["label", "canonical_id", "kind"],
+            "properties": {
+              "label": { "type": "string", "minLength": 1 },
+              "canonical_id": { "type": "string", "minLength": 1 },
+              "kind": { "type": "string", "minLength": 1 },
+              "cel": { "type": "string" }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

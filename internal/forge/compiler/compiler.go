@@ -27,6 +27,7 @@ import (
 	"github.com/kernloom/kernloom-core/internal/core/signing"
 	"github.com/kernloom/kernloom-core/internal/core/version"
 	"github.com/kernloom/kernloom-core/internal/storage/artifactstore"
+	"gopkg.in/yaml.v3"
 )
 
 const (
@@ -63,6 +64,13 @@ func Compile(opts Options) ([]Result, error) {
 	if err := validateCatalogCEL(catalog, celValidator); err != nil {
 		return nil, err
 	}
+	adapterManifests, err := LoadAdapterManifests(opts)
+	if err != nil {
+		return nil, err
+	}
+	if err := ValidateAdapterManifests(catalog, adapterManifests); err != nil {
+		return nil, err
+	}
 
 	files, err := intentFiles(opts)
 	if err != nil {
@@ -74,7 +82,7 @@ func Compile(opts Options) ([]Result, error) {
 		if err != nil {
 			return nil, err
 		}
-		result, err := compileOne(context.Background(), card, catalog, celValidator, opts, services)
+		result, err := compileOne(context.Background(), card, catalog, celValidator, opts, services, adapterManifests)
 		if err != nil {
 			return nil, err
 		}
@@ -136,7 +144,7 @@ func compileServices(opts Options) (compileRuntime, error) {
 	return compileRuntime{ArtifactStore: store, Signer: signer, ExpiresAt: &expiresAt}, nil
 }
 
-func compileOne(ctx context.Context, card *intent.Card, catalog *registry.Catalog, celValidator *expression.CELValidator, opts Options, services compileRuntime) (Result, error) {
+func compileOne(ctx context.Context, card *intent.Card, catalog *registry.Catalog, celValidator *expression.CELValidator, opts Options, services compileRuntime, adapterManifests map[string]AdapterManifest) (Result, error) {
 	if err := validateMetadata(card, catalog); err != nil {
 		return Result{}, err
 	}
@@ -243,8 +251,16 @@ func compileOne(ctx context.Context, card *intent.Card, catalog *registry.Catalo
 	if err != nil {
 		return Result{}, err
 	}
-	runtimeBundle := runtimeBundleArtifact(card, resolved, artifactMetadata)
+	runtimeBundle, err := runtimeBundleArtifact(card, resolved, artifactMetadata, catalog, adapterManifests)
+	if err != nil {
+		return Result{}, err
+	}
 	runtimeBundleOutput, err := emitJSONArtifact(ctx, filepath.Join(opts.OutputDir, "artifacts", card.ID+".runtime_bundle.json"), runtimeBundle, runtimeBundle.Metadata, services, opts)
+	if err != nil {
+		return Result{}, err
+	}
+	usedAdapterManifests := adapterManifestsForRuntimeBundle(runtimeBundle, adapterManifests)
+	adapterManifestOutputs, err := emitAdapterManifestArtifacts(ctx, card.ID, artifactMetadata, usedAdapterManifests, services, opts)
 	if err != nil {
 		return Result{}, err
 	}
@@ -333,10 +349,13 @@ func compileOne(ctx context.Context, card *intent.Card, catalog *registry.Catalo
 				BinaryDigest: compilerBinaryDigest,
 				Digest:       digestJSON(map[string]string{"name": "forge", "version": version.Version, "source_commit": compilerSourceCommit, "binary_digest": compilerBinaryDigest}),
 			},
-			Profile:       DigestRef{ID: profile.ID, Digest: digestJSON(profile)},
-			RiskRecipe:    DigestRef{ID: riskRecipe.ID, Digest: digestJSON(riskRecipe)},
-			CatalogDigest: digestJSON(catalog),
-			Adapters:      adapterManifestRefs(opts),
+			Profile:                DigestRef{ID: profile.ID, Digest: digestJSON(profile)},
+			RiskRecipe:             DigestRef{ID: riskRecipe.ID, Digest: digestJSON(riskRecipe)},
+			CatalogDigest:          digestJSON(catalog),
+			Adapters:               adapterManifestRefs(usedAdapterManifests, adapterManifestOutputs),
+			Bindings:               bindingRefsFromRuntimeBundle(runtimeBundle),
+			RuntimeActions:         runtimeActionRefsFromRuntimeBundle(runtimeBundle),
+			FederatedSourceDigests: federatedSourceDigests(coreRegistryDigest, enterpriseRegistryDigest, pathSHA256(opts.PolicyRepo), digestJSON(catalog), digestJSON(profile), digestJSON(riskRecipe), usedAdapterManifests),
 			Outputs: map[string]string{
 				"resolved_policy":         resolvedOutput.SHA256,
 				"runtime_bundle":          runtimeBundleOutput.SHA256,
@@ -352,12 +371,12 @@ func compileOne(ctx context.Context, card *intent.Card, catalog *registry.Catalo
 				"context_route_pack":      contextRoutePackOutput.Ref,
 				"conformance_expectation": conformanceExpectationOutput.Ref,
 			},
-			SignedOutputs: signedOutputs(map[string]emittedArtifact{
+			SignedOutputs: signedOutputs(mergeEmittedArtifacts(map[string]emittedArtifact{
 				"resolved_policy":         resolvedOutput,
 				"runtime_bundle":          runtimeBundleOutput,
 				"context_route_pack":      contextRoutePackOutput,
 				"conformance_expectation": conformanceExpectationOutput,
-			}),
+			}, adapterManifestSignedOutputMap(adapterManifestOutputs))),
 		},
 	}
 	manifestMetadata := artifactMetadata
@@ -548,14 +567,18 @@ func resolveSimulation(simulation intent.Simulation, catalog *registry.Catalog, 
 	return resolved, nil
 }
 
-func runtimeBundleArtifact(card *intent.Card, resolved ResolvedPolicy, metadata artifact.Metadata) bundle.RuntimeBundle {
+func runtimeBundleArtifact(card *intent.Card, resolved ResolvedPolicy, metadata artifact.Metadata, catalog *registry.Catalog, adapterManifests map[string]AdapterManifest) (bundle.RuntimeBundle, error) {
 	metadata.ID = "runtime_bundle." + card.ID
 	metadata.ArtifactType = "runtime_bundle"
 	actions := make([]bundle.RuntimeAction, 0, len(resolved.Spec.Runtime.Actions))
 	grants := make([]bundle.CapabilityGrant, 0, len(resolved.Spec.Runtime.Actions))
 	for _, action := range resolved.Spec.Runtime.Actions {
 		actions = append(actions, bundle.RuntimeAction{Label: action.Label, CanonicalID: action.CanonicalID})
-		if grant, ok := runtimeCapabilityGrant(card, resolved, action.CanonicalID); ok {
+		grant, ok, err := runtimeCapabilityGrant(card, resolved, action.CanonicalID, catalog, adapterManifests)
+		if err != nil {
+			return bundle.RuntimeBundle{}, err
+		}
+		if ok {
 			grants = append(grants, grant)
 		}
 	}
@@ -583,39 +606,69 @@ func runtimeBundleArtifact(card *intent.Card, resolved ResolvedPolicy, metadata 
 			MaxScopeSource:   resolved.Spec.Runtime.MaxScopeSource,
 		},
 		Status: artifact.PlannedStatus("Runtime bundle is planned and locally verifiable. Real adapter execution is not implemented yet."),
-	}
+	}, nil
 }
 
-func runtimeCapabilityGrant(card *intent.Card, resolved ResolvedPolicy, actionType string) (bundle.CapabilityGrant, bool) {
-	adapterID, capabilityID, ok := runtimeCapabilityForAction(actionType)
+func runtimeCapabilityGrant(card *intent.Card, resolved ResolvedPolicy, actionType string, catalog *registry.Catalog, adapterManifests map[string]AdapterManifest) (bundle.CapabilityGrant, bool, error) {
+	rule, ok := catalog.RuntimeActionRule(actionType)
 	if !ok {
-		return bundle.CapabilityGrant{}, false
+		return bundle.CapabilityGrant{}, false, fmt.Errorf("runtime action %q has no compiler rule", actionType)
+	}
+	if len(rule.CapabilityIDs) != 1 {
+		return bundle.CapabilityGrant{}, false, fmt.Errorf("compiler rule %q must resolve runtime action %q to exactly one v1 capability, got %d", rule.ID, actionType, len(rule.CapabilityIDs))
+	}
+	capabilityID := rule.CapabilityIDs[0]
+	capability, ok := catalog.Capability(capabilityID)
+	if !ok {
+		return bundle.CapabilityGrant{}, false, fmt.Errorf("compiler rule %q references unknown capability %q", rule.ID, capabilityID)
+	}
+	if strings.TrimSpace(capability.Status) == "planned" {
+		return bundle.CapabilityGrant{}, false, fmt.Errorf("capability %q is planned and cannot satisfy production runtime action %q", capabilityID, actionType)
+	}
+	binding, ok := catalog.AdapterBinding(capabilityID, card.Stage)
+	if !ok {
+		return bundle.CapabilityGrant{}, false, fmt.Errorf("capability %q has no enterprise adapter binding for stage %q", capabilityID, card.Stage)
+	}
+	adapterID := strings.TrimSpace(binding.AdapterID)
+	manifest, ok := adapterManifests[adapterID]
+	if !ok {
+		return bundle.CapabilityGrant{}, false, fmt.Errorf("adapter %q selected for capability %q has no adapter manifest", adapterID, capabilityID)
+	}
+	if !adapterManifestImplements(manifest, capabilityID, actionType) {
+		return bundle.CapabilityGrant{}, false, fmt.Errorf("adapter manifest %q does not implement capability %q for runtime action %q", adapterID, capabilityID, actionType)
 	}
 	scope := resolved.Spec.Runtime.MaxScope.Label
 	return bundle.CapabilityGrant{
-		ID:                  capabilityGrantID(card.ID, adapterID, capabilityID, actionType, scope),
-		AdapterID:           adapterID,
-		CapabilityID:        capabilityID,
-		ActionType:          actionType,
-		AllowedTargetScopes: []string{scope},
-		MaxTTL:              resolved.Spec.Runtime.MaxTTL,
-		Stage:               card.Stage,
-		Owner:               card.Owner,
-		ApprovalRef:         "build." + card.ID,
-	}, true
-}
-
-func runtimeCapabilityForAction(actionType string) (string, string, bool) {
-	switch actionType {
-	case "runtime_action.rate_limit_source", "runtime_action.deny_temporarily_source":
-		return "kernloom.adapter.klshield", "klshield.runtime.source_mitigation", true
-	default:
-		return "", "", false
-	}
+		ID:                    capabilityGrantID(card.ID, adapterID, capabilityID, actionType, scope),
+		BindingID:             binding.BindingID,
+		BindingDigest:         binding.Digest,
+		AdapterID:             adapterID,
+		AdapterManifestDigest: manifest.Digest,
+		CapabilityID:          capabilityID,
+		ActionType:            actionType,
+		ActionDigest:          runtimeActionDigest(card.ID, adapterID, capabilityID, actionType, scope, binding.Digest, manifest.Digest),
+		AllowedTargetScopes:   []string{scope},
+		MaxTTL:                resolved.Spec.Runtime.MaxTTL,
+		Stage:                 card.Stage,
+		Owner:                 card.Owner,
+		ApprovalRef:           "build." + card.ID,
+	}, true, nil
 }
 
 func capabilityGrantID(policyID, adapterID, capabilityID, actionType, scope string) string {
 	return "grant." + strings.TrimPrefix(sha256String(strings.Join([]string{policyID, adapterID, capabilityID, actionType, scope}, "\x00")), "sha256:")[:16]
+}
+
+func runtimeActionDigest(policyID, adapterID, capabilityID, actionType, scope, bindingDigest, manifestDigest string) string {
+	return digestJSON(map[string]string{
+		"policy_id":               policyID,
+		"adapter_id":              adapterID,
+		"capability_id":           capabilityID,
+		"action_type":             actionType,
+		"scope":                   scope,
+		"binding_digest":          bindingDigest,
+		"adapter_manifest_digest": manifestDigest,
+	})
 }
 
 func contextRoutePackArtifact(card *intent.Card, resolved ResolvedPolicy, metadata artifact.Metadata) corecontext.ContextRoutePack {
@@ -691,30 +744,406 @@ func validateCatalogCEL(catalog *registry.Catalog, celValidator *expression.CELV
 	return nil
 }
 
-func adapterManifestRefs(opts Options) map[string]AdapterRef {
-	return map[string]AdapterRef{
-		"ziti": {
-			ManifestDigest:  adapterRepoDigest(opts, "kernloom-adapter-ziti"),
-			ProtocolVersion: "adapter/v1",
-		},
-		"klshield": {
-			ManifestDigest:  adapterRepoDigest(opts, "kernloom-adapter-klshield"),
-			ProtocolVersion: "adapter/v1",
-		},
+func adapterManifestImplements(manifest AdapterManifest, capabilityID, actionType string) bool {
+	for _, capability := range manifest.Capabilities {
+		if strings.TrimSpace(capability.CapabilityID) != capabilityID {
+			continue
+		}
+		if strings.TrimSpace(capability.ImplementationStatus) != "implemented" {
+			return false
+		}
+		return containsString(capability.SupportedActions, actionType)
 	}
+	return false
 }
 
-func adapterRepoDigest(opts Options, repo string) string {
-	for _, root := range workspaceRootCandidates(opts) {
-		path := filepath.Join(root, repo)
-		if info, err := os.Stat(path); err == nil && info.IsDir() {
-			return pathSHA256(path)
+func containsString(values []string, needle string) bool {
+	needle = strings.TrimSpace(needle)
+	for _, value := range values {
+		if strings.TrimSpace(value) == needle {
+			return true
 		}
 	}
-	return "sha256:unavailable"
+	return false
 }
 
-func workspaceRootCandidates(opts Options) []string {
+func LoadAdapterManifests(opts Options) (map[string]AdapterManifest, error) {
+	for _, roots := range adapterManifestRootGroups(opts) {
+		manifests, err := loadAdapterManifestsFromRoots(roots)
+		if err != nil {
+			return nil, err
+		}
+		if len(manifests) != 0 {
+			return manifests, nil
+		}
+	}
+	return map[string]AdapterManifest{}, nil
+}
+
+func LoadAdapterManifestFile(path string) (AdapterManifest, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return AdapterManifest{}, err
+	}
+	var manifest AdapterManifest
+	if err := yaml.Unmarshal(data, &manifest); err != nil {
+		return AdapterManifest{}, fmt.Errorf("adapter_manifest_invalid: %s: %w", path, err)
+	}
+	if err := validateAdapterManifestShape(path, manifest); err != nil {
+		return AdapterManifest{}, err
+	}
+	manifest.Path = path
+	manifest.Digest = sha256Bytes(data)
+	return manifest, nil
+}
+
+func loadAdapterManifestsFromRoots(roots []string) (map[string]AdapterManifest, error) {
+	manifests := map[string]AdapterManifest{}
+	seenPaths := map[string]bool{}
+	for _, root := range roots {
+		entries, err := os.ReadDir(root)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if !entry.IsDir() || !strings.HasPrefix(entry.Name(), "kernloom-adapter-") {
+				continue
+			}
+			path := filepath.Join(root, entry.Name(), "adapter.manifest.yaml")
+			if seenPaths[path] {
+				continue
+			}
+			seenPaths[path] = true
+			manifest, err := LoadAdapterManifestFile(path)
+			if err != nil {
+				if os.IsNotExist(err) {
+					continue
+				}
+				return nil, err
+			}
+			if _, exists := manifests[manifest.AdapterID]; exists {
+				return nil, fmt.Errorf("adapter_manifest_duplicate: duplicate adapter manifest for %q", manifest.AdapterID)
+			}
+			manifests[manifest.AdapterID] = manifest
+		}
+	}
+	return manifests, nil
+}
+
+func ValidateAdapterManifests(catalog *registry.Catalog, manifests map[string]AdapterManifest) error {
+	for adapterID, manifest := range manifests {
+		if manifest.ComponentRole != "" {
+			if _, ok := catalog.CatalogEntry("component_role", manifest.ComponentRole); !ok {
+				return fmt.Errorf("adapter_manifest_invalid: %s: adapter %q references unknown component_role %q", manifest.Path, adapterID, manifest.ComponentRole)
+			}
+		}
+		for _, capability := range manifest.Capabilities {
+			spec, ok := catalog.Capability(capability.CapabilityID)
+			if !ok {
+				return fmt.Errorf("adapter_manifest_invalid: %s: adapter %q references unknown capability %q", manifest.Path, adapterID, capability.CapabilityID)
+			}
+			if capability.ImplementationStatus == "implemented" && spec.Status == "planned" {
+				return fmt.Errorf("adapter_manifest_invalid: %s: adapter %q claims implemented planned capability %q", manifest.Path, adapterID, capability.CapabilityID)
+			}
+			for _, action := range capability.SupportedActions {
+				if !capabilitySupportsRuntimeAction(spec, action) {
+					return fmt.Errorf("adapter_manifest_invalid: %s: adapter %q capability %q declares unsupported action %q", manifest.Path, adapterID, capability.CapabilityID, action)
+				}
+			}
+			for _, granularity := range capability.ImplementedGranularities {
+				if _, ok := catalog.CatalogEntry("granularity", granularity); !ok {
+					return fmt.Errorf("adapter_manifest_invalid: %s: adapter %q capability %q references unknown granularity %q", manifest.Path, adapterID, capability.CapabilityID, granularity)
+				}
+				if len(spec.SupportedGranularities) > 0 && !containsString(spec.SupportedGranularities, granularity) {
+					return fmt.Errorf("adapter_manifest_invalid: %s: adapter %q capability %q declares unsupported granularity %q", manifest.Path, adapterID, capability.CapabilityID, granularity)
+				}
+			}
+			for _, privilege := range capability.RequiredPrivileges {
+				if _, ok := catalog.CatalogEntry("privilege", privilege); !ok {
+					return fmt.Errorf("adapter_manifest_invalid: %s: adapter %q capability %q references unknown privilege %q", manifest.Path, adapterID, capability.CapabilityID, privilege)
+				}
+			}
+			if capability.ImplementationStatus == "implemented" {
+				for _, privilege := range spec.PrivilegeRequirements {
+					if !containsString(capability.RequiredPrivileges, privilege) {
+						return fmt.Errorf("adapter_manifest_invalid: %s: adapter %q capability %q omits required privilege %q", manifest.Path, adapterID, capability.CapabilityID, privilege)
+					}
+				}
+			}
+		}
+		for _, signal := range manifest.Signals {
+			if _, ok := catalog.CatalogEntry("signal", signal.SignalID); !ok {
+				return fmt.Errorf("adapter_manifest_invalid: %s: adapter %q references unknown signal %q", manifest.Path, adapterID, signal.SignalID)
+			}
+		}
+		for _, signal := range manifest.RawSignals {
+			if _, ok := catalog.CatalogEntry("signal", signal.SignalID); ok {
+				continue
+			}
+			if !isAdapterRawSignal(manifest.AdapterID, signal.SignalID) {
+				return fmt.Errorf("adapter_manifest_invalid: %s: adapter %q references unknown raw signal %q", manifest.Path, adapterID, signal.SignalID)
+			}
+			if len(signal.Projectors) == 0 {
+				return fmt.Errorf("adapter_manifest_invalid: %s: adapter %q raw signal %q requires at least one projector", manifest.Path, adapterID, signal.SignalID)
+			}
+		}
+		for _, privilege := range manifest.Privileges {
+			if _, ok := catalog.CatalogEntry("privilege", privilege.PrivilegeID); !ok {
+				return fmt.Errorf("adapter_manifest_invalid: %s: adapter %q references unknown privilege %q", manifest.Path, adapterID, privilege.PrivilegeID)
+			}
+		}
+		for _, contextRequirement := range manifest.ContextRequirements {
+			if !catalog.HasRegistryID(contextRequirement) {
+				return fmt.Errorf("adapter_manifest_invalid: %s: adapter %q references unknown context requirement %q", manifest.Path, adapterID, contextRequirement)
+			}
+		}
+	}
+	return nil
+}
+
+func validateAdapterManifestShape(path string, manifest AdapterManifest) error {
+	if strings.TrimSpace(manifest.AdapterID) == "" {
+		return fmt.Errorf("adapter_manifest_invalid: %s: adapter_id is required", path)
+	}
+	if strings.TrimSpace(manifest.AdapterVersion) == "" {
+		return fmt.Errorf("adapter_manifest_invalid: %s: adapter_version is required", path)
+	}
+	if strings.TrimSpace(manifest.ProtocolVersion) == "" {
+		return fmt.Errorf("adapter_manifest_invalid: %s: protocol_version is required", path)
+	}
+	if !containsString([]string{"stable", "planned", "experimental"}, manifest.Status) {
+		return fmt.Errorf("adapter_manifest_invalid: %s: status must be stable, planned or experimental", path)
+	}
+	if len(manifest.Capabilities) == 0 {
+		return fmt.Errorf("adapter_manifest_invalid: %s: at least one capability is required", path)
+	}
+	seenCapabilities := map[string]bool{}
+	for i, capability := range manifest.Capabilities {
+		capabilityID := strings.TrimSpace(capability.CapabilityID)
+		if capabilityID == "" {
+			return fmt.Errorf("adapter_manifest_invalid: %s: capability %d missing capability_id", path, i)
+		}
+		if seenCapabilities[capabilityID] {
+			return fmt.Errorf("adapter_manifest_invalid: %s: duplicate capability %q", path, capabilityID)
+		}
+		seenCapabilities[capabilityID] = true
+		if !containsString([]string{"implemented", "planned", "experimental"}, capability.ImplementationStatus) {
+			return fmt.Errorf("adapter_manifest_invalid: %s: capability %q implementation_status must be implemented, planned or experimental", path, capabilityID)
+		}
+	}
+	return nil
+}
+
+func capabilitySupportsRuntimeAction(capability registry.CapabilitySpec, action string) bool {
+	return containsString(capability.SupportedActions, action) || containsString(capability.CompatibilityAliases, action)
+}
+
+func isAdapterRawSignal(adapterID, signalID string) bool {
+	adapterID = strings.TrimSpace(adapterID)
+	signalID = strings.TrimSpace(signalID)
+	const adapterPrefix = "kernloom.adapter."
+	if !strings.HasPrefix(adapterID, adapterPrefix) || !strings.HasPrefix(signalID, "signal.") {
+		return false
+	}
+	adapterName := strings.TrimPrefix(adapterID, adapterPrefix)
+	if adapterName == "" {
+		return false
+	}
+	return strings.HasPrefix(signalID, "signal."+adapterName+".raw_")
+}
+
+func adapterManifestRefs(manifests map[string]AdapterManifest, outputs map[string]emittedArtifact) map[string]AdapterRef {
+	refs := map[string]AdapterRef{}
+	ids := make([]string, 0, len(manifests))
+	for id := range manifests {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		manifest := manifests[id]
+		refs[id] = AdapterRef{
+			AdapterID:       manifest.AdapterID,
+			AdapterVersion:  manifest.AdapterVersion,
+			ManifestDigest:  manifest.Digest,
+			ProtocolVersion: manifest.ProtocolVersion,
+			SignedManifest:  signedOutputRef(outputs[id]),
+		}
+	}
+	return refs
+}
+
+func adapterManifestsForRuntimeBundle(runtimeBundle bundle.RuntimeBundle, manifests map[string]AdapterManifest) map[string]AdapterManifest {
+	used := map[string]AdapterManifest{}
+	for _, grant := range runtimeBundle.Spec.CapabilityGrants {
+		adapterID := strings.TrimSpace(grant.AdapterID)
+		if adapterID == "" {
+			continue
+		}
+		if manifest, ok := manifests[adapterID]; ok {
+			used[adapterID] = manifest
+		}
+	}
+	if len(used) == 0 {
+		return nil
+	}
+	return used
+}
+
+func emitAdapterManifestArtifacts(ctx context.Context, policyID string, baseMetadata artifact.Metadata, manifests map[string]AdapterManifest, services compileRuntime, opts Options) (map[string]emittedArtifact, error) {
+	if len(manifests) == 0 {
+		return nil, nil
+	}
+	outputs := map[string]emittedArtifact{}
+	ids := make([]string, 0, len(manifests))
+	for id := range manifests {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		manifest := manifests[id]
+		metadata := baseMetadata
+		metadata.ID = "adapter_manifest." + id
+		metadata.PolicyID = policyID
+		metadata.ArtifactType = "adapter_manifest"
+		if metadata.Digests == nil {
+			metadata.Digests = map[string]string{}
+		}
+		metadata.Digests["adapter_manifest:"+id] = manifest.Digest
+		value := AdapterManifestArtifact{
+			Kind:     "AdapterManifest",
+			Metadata: metadata,
+			Spec:     manifest,
+		}
+		filename := safeArtifactFilename(id) + ".adapter_manifest.json"
+		output, err := emitJSONArtifact(ctx, filepath.Join(opts.OutputDir, "artifacts", "adapter_manifests", filename), value, metadata, services, opts)
+		if err != nil {
+			return nil, err
+		}
+		outputs[id] = output
+	}
+	return outputs, nil
+}
+
+func safeArtifactFilename(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "unknown"
+	}
+	var b strings.Builder
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '.', r == '_', r == '-':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	return b.String()
+}
+
+func adapterManifestSignedOutputMap(outputs map[string]emittedArtifact) map[string]emittedArtifact {
+	if len(outputs) == 0 {
+		return nil
+	}
+	flat := map[string]emittedArtifact{}
+	for id, output := range outputs {
+		flat["adapter_manifest:"+id] = output
+	}
+	return flat
+}
+
+func mergeEmittedArtifacts(left, right map[string]emittedArtifact) map[string]emittedArtifact {
+	merged := map[string]emittedArtifact{}
+	for key, value := range left {
+		merged[key] = value
+	}
+	for key, value := range right {
+		merged[key] = value
+	}
+	return merged
+}
+
+func bindingRefsFromRuntimeBundle(runtimeBundle bundle.RuntimeBundle) map[string]BindingRef {
+	refs := map[string]BindingRef{}
+	for _, grant := range runtimeBundle.Spec.CapabilityGrants {
+		if strings.TrimSpace(grant.BindingID) == "" {
+			continue
+		}
+		refs[grant.BindingID] = BindingRef{
+			BindingID:    grant.BindingID,
+			Digest:       grant.BindingDigest,
+			AdapterID:    grant.AdapterID,
+			CapabilityID: grant.CapabilityID,
+		}
+	}
+	if len(refs) == 0 {
+		return nil
+	}
+	return refs
+}
+
+func runtimeActionRefsFromRuntimeBundle(runtimeBundle bundle.RuntimeBundle) map[string]RuntimeActionRef {
+	refs := map[string]RuntimeActionRef{}
+	for _, grant := range runtimeBundle.Spec.CapabilityGrants {
+		refs[grant.ID] = RuntimeActionRef{
+			CapabilityGrantID:     grant.ID,
+			BindingID:             grant.BindingID,
+			AdapterID:             grant.AdapterID,
+			AdapterManifestDigest: grant.AdapterManifestDigest,
+			CapabilityID:          grant.CapabilityID,
+			ActionType:            grant.ActionType,
+			ActionDigest:          grant.ActionDigest,
+		}
+	}
+	if len(refs) == 0 {
+		return nil
+	}
+	return refs
+}
+
+func federatedSourceDigests(coreRegistry, enterpriseRegistry, policyRepo, catalog, profile, riskRecipe string, manifests map[string]AdapterManifest) map[string]string {
+	digests := map[string]string{
+		"core_registry":       coreRegistry,
+		"enterprise_registry": enterpriseRegistry,
+		"policy_repo":         policyRepo,
+		"catalog":             catalog,
+		"profile":             profile,
+		"risk_recipe":         riskRecipe,
+	}
+	ids := make([]string, 0, len(manifests))
+	for id := range manifests {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		if digest := strings.TrimSpace(manifests[id].Digest); digest != "" {
+			digests["adapter:"+id] = digest
+		}
+	}
+	return digests
+}
+
+func adapterManifestRootGroups(opts Options) [][]string {
+	explicit := workspaceRootParentCandidates([]string{opts.PolicyRepo, opts.CoreRegistry, opts.EnterpriseRegistry})
+	fallback := workspaceRootPathCandidates([]string{"..", "."})
+	if len(explicit) == 0 {
+		return [][]string{fallback}
+	}
+	return [][]string{explicit, fallback}
+}
+
+func workspaceRootParentCandidates(paths []string) []string {
+	var roots []string
+	for _, path := range paths {
+		if path == "" {
+			continue
+		}
+		roots = append(roots, filepath.Dir(path))
+	}
+	return workspaceRootPathCandidates(roots)
+}
+
+func workspaceRootPathCandidates(paths []string) []string {
 	seen := map[string]bool{}
 	var roots []string
 	add := func(path string) {
@@ -730,14 +1159,9 @@ func workspaceRootCandidates(opts Options) []string {
 			roots = append(roots, abs)
 		}
 	}
-	for _, path := range []string{opts.PolicyRepo, opts.CoreRegistry, opts.EnterpriseRegistry} {
-		if path == "" {
-			continue
-		}
-		add(filepath.Dir(path))
+	for _, path := range paths {
+		add(path)
 	}
-	add("..")
-	add(".")
 	return roots
 }
 
@@ -836,18 +1260,25 @@ func signedOutputs(outputs map[string]emittedArtifact) map[string]SignedOutputRe
 		if output.SignedPath == "" {
 			continue
 		}
-		signed[name] = SignedOutputRef{
-			Path:           output.SignedPath,
-			ArtifactRef:    output.SignedRef,
-			EnvelopeSHA256: output.SignedSHA256,
-			PayloadSHA256:  output.Envelope.PayloadSHA256,
-			KeyID:          output.Envelope.KeyID,
-		}
+		signed[name] = signedOutputRef(output)
 	}
 	if len(signed) == 0 {
 		return nil
 	}
 	return signed
+}
+
+func signedOutputRef(output emittedArtifact) SignedOutputRef {
+	if output.SignedPath == "" {
+		return SignedOutputRef{}
+	}
+	return SignedOutputRef{
+		Path:           output.SignedPath,
+		ArtifactRef:    output.SignedRef,
+		EnvelopeSHA256: output.SignedSHA256,
+		PayloadSHA256:  output.Envelope.PayloadSHA256,
+		KeyID:          output.Envelope.KeyID,
+	}
 }
 
 func writeJSON(path string, value any) (string, string, error) {

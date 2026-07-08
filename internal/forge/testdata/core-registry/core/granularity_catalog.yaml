@@ -1,0 +1,5 @@
+kind: GranularityCatalog
+spec:
+  entries:
+    - id: granularity.entity
+    - id: granularity.relationship

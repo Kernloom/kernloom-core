@@ -34,18 +34,22 @@ type RuntimeAction struct {
 }
 
 type CapabilityGrant struct {
-	ID                  string               `json:"capability_grant_id"`
-	AdapterID           string               `json:"adapter_id"`
-	CapabilityID        string               `json:"capability_id"`
-	ActionType          string               `json:"action_type"`
-	AllowedTargetScopes []string             `json:"allowed_target_scopes"`
-	MaxTTL              string               `json:"max_ttl"`
-	Stage               string               `json:"stage,omitempty"`
-	Environment         string               `json:"environment,omitempty"`
-	Owner               string               `json:"owner,omitempty"`
-	ApprovalRef         string               `json:"approval_ref,omitempty"`
-	ExpiresAt           string               `json:"expires_at,omitempty"`
-	RateLimit           *RateLimitParameters `json:"rate_limit,omitempty"`
+	ID                    string               `json:"capability_grant_id"`
+	BindingID             string               `json:"binding_id,omitempty"`
+	BindingDigest         string               `json:"binding_digest,omitempty"`
+	AdapterID             string               `json:"adapter_id"`
+	AdapterManifestDigest string               `json:"adapter_manifest_digest,omitempty"`
+	CapabilityID          string               `json:"capability_id"`
+	ActionType            string               `json:"action_type"`
+	ActionDigest          string               `json:"action_digest,omitempty"`
+	AllowedTargetScopes   []string             `json:"allowed_target_scopes"`
+	MaxTTL                string               `json:"max_ttl"`
+	Stage                 string               `json:"stage,omitempty"`
+	Environment           string               `json:"environment,omitempty"`
+	Owner                 string               `json:"owner,omitempty"`
+	ApprovalRef           string               `json:"approval_ref,omitempty"`
+	ExpiresAt             string               `json:"expires_at,omitempty"`
+	RateLimit             *RateLimitParameters `json:"rate_limit,omitempty"`
 }
 
 type RateLimitParameters struct {

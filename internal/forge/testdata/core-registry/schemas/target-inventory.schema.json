@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kernloom.dev/schemas/target-inventory.schema.json",
+  "title": "Kernloom target inventory",
+  "type": "object",
+  "required": ["target"],
+  "properties": {
+    "target": {
+      "type": "object",
+      "required": ["id", "tenant", "environment", "type", "adapter"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "tenant": { "type": "string", "minLength": 1 },
+        "environment": { "type": "string", "minLength": 1 },
+        "type": { "type": "string", "minLength": 1 },
+        "adapter": { "type": "string", "minLength": 1 },
+        "adapter_version": { "type": "string", "minLength": 1 },
+        "capabilities": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "validation_profiles": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "config_backend": { "type": "object", "additionalProperties": true },
+        "validation_source": { "type": "object", "additionalProperties": true },
+        "runtime": { "type": "object", "additionalProperties": true },
+        "ownership": { "type": "object", "additionalProperties": true }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

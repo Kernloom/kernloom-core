@@ -1,0 +1,19 @@
+kind: RepositoryBindingSet
+spec:
+  repositories:
+    - id: repo.enterprise-kernloom-policies
+      type: git
+      provider: github
+      org: kernloom-demo
+      repo: enterprise-kernloom-policies
+      default_branch: main
+      owner_team: security-platform
+      visibility: restricted
+    - id: repo.kernloom-demo-klshield-config
+      type: git
+      provider: github
+      org: kernloom-demo
+      repo: klshield-config
+      default_branch: main
+      owner_team: security-platform
+      visibility: platform_team

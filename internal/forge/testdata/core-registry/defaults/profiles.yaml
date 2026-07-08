@@ -8,3 +8,10 @@ spec:
       runtime_defaults:
         max_ttl: 15m
         max_scope: user
+    - id: production.runtime_mitigation
+      stage: prod
+      guardrails:
+        - guardrail.unknown_is_not_success
+      runtime_defaults:
+        max_ttl: 10m
+        max_scope: application

@@ -1,0 +1,5 @@
+kind: ValidationProfileCatalog
+spec:
+  entries:
+    - id: validation.klshield.runtime_action.v1
+    - id: validation.ziti.overlay_service_policy.v1

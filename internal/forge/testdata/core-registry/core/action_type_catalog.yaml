@@ -1,0 +1,6 @@
+kind: ActionTypeCatalog
+spec:
+  entries:
+    - id: action_type.connectivity
+    - id: action_type.runtime_mitigation
+    - id: action_type.config_validation

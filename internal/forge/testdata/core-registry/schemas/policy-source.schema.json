@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kernloom.dev/schemas/policy-source.schema.json",
+  "title": "Kernloom policy source",
+  "type": "object",
+  "required": ["kind", "spec"],
+  "properties": {
+    "kind": { "enum": ["PolicySourceIndex"] },
+    "metadata": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "version": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "spec": {
+      "type": "object",
+      "required": ["policy_sources"],
+      "properties": {
+        "policy_sources": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "type", "repo_ref", "tenant_scope", "environment_scope"],
+            "properties": {
+              "id": { "type": "string", "minLength": 1 },
+              "type": { "enum": ["config_repo", "policy_repo"] },
+              "repo_ref": { "type": "string", "minLength": 1 },
+              "tenant_scope": { "type": "string", "minLength": 1 },
+              "environment_scope": { "type": "string", "minLength": 1 },
+              "resource_scope": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+              "target_scope": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+              "visibility": { "type": "string", "minLength": 1 },
+              "owner": { "type": "string", "minLength": 1 },
+              "policy_paths": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+              "policy_meanings": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["policy_path"],
+                  "properties": {
+                    "policy_path": { "type": "string", "minLength": 1 },
+                    "canonical_actions": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+                    "action_types": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}
