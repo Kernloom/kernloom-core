@@ -111,18 +111,20 @@ func TestLoadKLIQServiceTokenSecretPrefersFile(t *testing.T) {
 
 func TestValidateForgeAPIProductionConfigRequiresRemoteSignerAndNoDevPaths(t *testing.T) {
 	valid := forgeAPIProductionConfig{
-		TLSCert:                  "server.crt",
-		TLSKey:                   "server.key",
-		QueueKind:                "redis",
-		ManagementStoreKind:      "postgres",
-		ManagementPostgresDSN:    "postgres://kernloom",
-		ManagementSignerURL:      "https://signer.example",
-		ArtifactStoreEnvironment: "prod",
-		OIDCIssuer:               "https://idp.example",
-		OIDCAudience:             "kernloom-forge",
-		OIDCJWKSURL:              "https://idp.example/jwks.json",
-		ContextBindings:          "/etc/kernloom/context-bindings.yaml",
-		BootstrapConfig:          "/etc/kernloom/bootstrap-root.yaml",
+		TLSCert:                    "server.crt",
+		TLSKey:                     "server.key",
+		QueueKind:                  "redis",
+		ManagementStoreKind:        "postgres",
+		ManagementPostgresDSN:      "postgres://kernloom",
+		ManagementSignerURL:        "https://signer.example",
+		ArtifactStoreEnvironment:   "prod",
+		OIDCIssuer:                 "https://idp.example",
+		OIDCAudience:               "kernloom-forge",
+		OIDCJWKSURL:                "https://idp.example/jwks.json",
+		OIDCJWKSRefreshInterval:    10 * time.Minute,
+		OIDCJWKSMinRefreshInterval: 30 * time.Second,
+		ContextBindings:            "/etc/kernloom/context-bindings.yaml",
+		BootstrapConfig:            "/etc/kernloom/bootstrap-root.yaml",
 	}
 	if err := validateForgeAPIProductionConfig(valid); err != nil {
 		t.Fatalf("expected valid production config, got %v", err)
@@ -151,6 +153,16 @@ func TestValidateForgeAPIProductionConfigRequiresRemoteSignerAndNoDevPaths(t *te
 	invalid.OIDCJWKSURL = "http://idp.example/jwks.json"
 	if err := validateForgeAPIProductionConfig(invalid); err == nil || !strings.Contains(err.Error(), "https --oidc-jwks-url") {
 		t.Fatalf("expected HTTPS JWKS requirement, got %v", err)
+	}
+	invalid = valid
+	invalid.OIDCJWKSRefreshInterval = 0
+	if err := validateForgeAPIProductionConfig(invalid); err == nil || !strings.Contains(err.Error(), "oidc-jwks-refresh-interval") {
+		t.Fatalf("expected JWKS refresh interval requirement, got %v", err)
+	}
+	invalid = valid
+	invalid.OIDCJWKSMinRefreshInterval = 0
+	if err := validateForgeAPIProductionConfig(invalid); err == nil || !strings.Contains(err.Error(), "oidc-jwks-min-refresh-interval") {
+		t.Fatalf("expected JWKS minimum refresh interval requirement, got %v", err)
 	}
 	invalid = valid
 	invalid.ContextBindings = ""

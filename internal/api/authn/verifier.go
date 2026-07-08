@@ -103,17 +103,18 @@ func (DevTokenVerifier) Verify(_ context.Context, token string) (Principal, erro
 }
 
 type JWTVerifier struct {
-	Issuer            string
-	Audience          string
-	HMACSecret        []byte
-	RSAPublicKey      *rsa.PublicKey
-	RSAPublicKeys     map[string]*rsa.PublicKey
-	AllowMissingRoles bool
-	Now               func() time.Time
+	Issuer             string
+	Audience           string
+	HMACSecret         []byte
+	RSAPublicKey       *rsa.PublicKey
+	RSAPublicKeys      map[string]*rsa.PublicKey
+	RSAPublicKeySource RSAPublicKeyProvider
+	AllowMissingRoles  bool
+	Now                func() time.Time
 }
 
-func (v JWTVerifier) Verify(_ context.Context, token string) (Principal, error) {
-	if len(v.HMACSecret) == 0 && v.RSAPublicKey == nil && len(v.RSAPublicKeys) == 0 {
+func (v JWTVerifier) Verify(ctx context.Context, token string) (Principal, error) {
+	if len(v.HMACSecret) == 0 && v.RSAPublicKey == nil && len(v.RSAPublicKeys) == 0 && v.RSAPublicKeySource == nil {
 		return Principal{}, ErrUnauthenticated
 	}
 	parts := strings.Split(token, ".")
@@ -148,7 +149,7 @@ func (v JWTVerifier) Verify(_ context.Context, token string) (Principal, error) 
 			return Principal{}, ErrUnauthenticated
 		}
 	case "RS256":
-		publicKey, err := v.rsaPublicKey(header.Kid)
+		publicKey, err := v.rsaPublicKey(ctx, header.Kid)
 		if err != nil {
 			return Principal{}, ErrUnauthenticated
 		}
@@ -186,8 +187,17 @@ func (v JWTVerifier) Verify(_ context.Context, token string) (Principal, error) 
 	}, nil
 }
 
-func (v JWTVerifier) rsaPublicKey(kid string) (*rsa.PublicKey, error) {
+func (v JWTVerifier) rsaPublicKey(ctx context.Context, kid string) (*rsa.PublicKey, error) {
 	kid = strings.TrimSpace(kid)
+	if v.RSAPublicKeySource != nil {
+		key, err := v.RSAPublicKeySource.Key(ctx, kid)
+		if err == nil {
+			return key, nil
+		}
+		if kid != "" || (v.RSAPublicKey == nil && len(v.RSAPublicKeys) == 0) {
+			return nil, err
+		}
+	}
 	if len(v.RSAPublicKeys) == 0 {
 		if v.RSAPublicKey == nil {
 			return nil, ErrUnauthenticated

@@ -140,6 +140,8 @@ func api(args []string) {
 	oidcHMACSecret := fs.String("oidc-hmac-secret", "", "HS256 secret for local OIDC/OAuth2 JWT verification")
 	oidcRSAPublicKey := fs.String("oidc-rsa-public-key", "", "PEM-encoded RSA public key for RS256 OIDC/OAuth2 JWT verification")
 	oidcJWKSURL := fs.String("oidc-jwks-url", "", "OIDC/OAuth2 JWKS URL for RS256 JWT verification")
+	oidcJWKSRefreshInterval := fs.Duration("oidc-jwks-refresh-interval", 10*time.Minute, "OIDC JWKS periodic refresh interval")
+	oidcJWKSMinRefreshInterval := fs.Duration("oidc-jwks-min-refresh-interval", 30*time.Second, "minimum interval between forced OIDC JWKS refreshes for unknown kid")
 	contextBindings := fs.String("context-bindings", "", "context/principal bindings YAML path for OIDC claim normalization")
 	bootstrapConfig := fs.String("bootstrap-config", "", "Forge bootstrap root YAML path")
 	managementSigningKey := fs.String("management-signing-key", "./var/kernloom/forge/management.ed25519.json", "dev-local signing key for KLIQ assignments")
@@ -189,6 +191,8 @@ func api(args []string) {
 			OIDCHMACSecret:                *oidcHMACSecret,
 			OIDCRSAPublicKey:              *oidcRSAPublicKey,
 			OIDCJWKSURL:                   *oidcJWKSURL,
+			OIDCJWKSRefreshInterval:       *oidcJWKSRefreshInterval,
+			OIDCJWKSMinRefreshInterval:    *oidcJWKSMinRefreshInterval,
 			ContextBindings:               *contextBindings,
 			BootstrapConfig:               *bootstrapConfig,
 		}); err != nil {
@@ -212,7 +216,7 @@ func api(args []string) {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
-	authenticator, err := authenticator(*enableDevTokens, *oidcIssuer, *oidcAudience, *oidcHMACSecret, *oidcRSAPublicKey, *oidcJWKSURL, *contextBindings)
+	authenticator, err := authenticator(*enableDevTokens, *oidcIssuer, *oidcAudience, *oidcHMACSecret, *oidcRSAPublicKey, *oidcJWKSURL, *oidcJWKSRefreshInterval, *oidcJWKSMinRefreshInterval, *contextBindings)
 	if err != nil {
 		logger.Error("forge_authenticator_failed", "error", err.Error())
 		fmt.Fprintln(os.Stderr, err)
@@ -388,6 +392,8 @@ type forgeAPIProductionConfig struct {
 	OIDCHMACSecret                string
 	OIDCRSAPublicKey              string
 	OIDCJWKSURL                   string
+	OIDCJWKSRefreshInterval       time.Duration
+	OIDCJWKSMinRefreshInterval    time.Duration
 	ContextBindings               string
 	BootstrapConfig               string
 }
@@ -418,6 +424,12 @@ func validateForgeAPIProductionConfig(cfg forgeAPIProductionConfig) error {
 		}
 		if parsedJWKS.Scheme != "https" {
 			return fmt.Errorf("production Forge API requires an https --oidc-jwks-url")
+		}
+		if cfg.OIDCJWKSRefreshInterval <= 0 {
+			return fmt.Errorf("production Forge API requires positive --oidc-jwks-refresh-interval")
+		}
+		if cfg.OIDCJWKSMinRefreshInterval <= 0 {
+			return fmt.Errorf("production Forge API requires positive --oidc-jwks-min-refresh-interval")
 		}
 	}
 	if strings.TrimSpace(cfg.ContextBindings) == "" {
@@ -483,7 +495,7 @@ func loadKLIQServiceTokenSecret(flagValue, filePath string, allowCLI bool) ([]by
 	return nil, nil
 }
 
-func authenticator(enableDevTokens bool, issuer, audience, hmacSecret, rsaPublicKeyPath, jwksURL, contextBindingsPath string) (authn.Chain, error) {
+func authenticator(enableDevTokens bool, issuer, audience, hmacSecret, rsaPublicKeyPath, jwksURL string, jwksRefreshInterval, jwksMinRefreshInterval time.Duration, contextBindingsPath string) (authn.Chain, error) {
 	var chain authn.Chain
 	if enableDevTokens {
 		chain = append(chain, authn.DevTokenVerifier{})
@@ -493,21 +505,30 @@ func authenticator(enableDevTokens bool, issuer, audience, hmacSecret, rsaPublic
 		if err != nil {
 			return nil, err
 		}
-		jwksKeys, err := authn.LoadJWKS(context.Background(), jwksURL)
-		if err != nil {
-			return nil, err
+		var jwksProvider authn.RSAPublicKeyProvider
+		if strings.TrimSpace(jwksURL) != "" {
+			refreshingJWKS, err := authn.NewRefreshingJWKS(context.Background(), authn.RefreshingJWKSOptions{
+				URL:                jwksURL,
+				RefreshInterval:    jwksRefreshInterval,
+				MinRefreshInterval: jwksMinRefreshInterval,
+			})
+			if err != nil {
+				return nil, err
+			}
+			refreshingJWKS.Start(context.Background())
+			jwksProvider = refreshingJWKS
 		}
 		contextBindings, err := authn.LoadContextBindings(contextBindingsPath)
 		if err != nil {
 			return nil, err
 		}
 		jwtVerifier := authn.JWTVerifier{
-			Issuer:            issuer,
-			Audience:          audience,
-			HMACSecret:        []byte(hmacSecret),
-			RSAPublicKey:      publicKey,
-			RSAPublicKeys:     jwksKeys,
-			AllowMissingRoles: len(contextBindings) > 0,
+			Issuer:             issuer,
+			Audience:           audience,
+			HMACSecret:         []byte(hmacSecret),
+			RSAPublicKey:       publicKey,
+			RSAPublicKeySource: jwksProvider,
+			AllowMissingRoles:  len(contextBindings) > 0,
 		}
 		if len(contextBindings) != 0 {
 			chain = append(chain, authn.ContextBindingVerifier{

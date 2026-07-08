@@ -27,12 +27,16 @@ forge api \
   --oidc-issuer https://idp.example.org \
   --oidc-audience kernloom-forge \
   --oidc-jwks-url https://idp.example.org/.well-known/jwks.json \
+  --oidc-jwks-refresh-interval 10m \
+  --oidc-jwks-min-refresh-interval 30s \
   --policy-repo /srv/kernloom/enterprise-kernloom-policies \
   --core-registry /srv/kernloom/kernloom-core-registry \
   --enterprise-registry /srv/kernloom/enterprise-kernloom-registry
 ```
 
 Fail-closed startup gates include missing TLS, dev tokens, HS256/HMAC OIDC, missing bootstrap root, missing context bindings, memory management store and local signer seeding.
+
+JWKS is loaded fail-closed during startup, then refreshed periodically. A token signed with an unknown `kid` triggers a bounded immediate refresh, so normal OIDC signing-key rotation does not require a Forge restart. If refresh fails, Forge keeps the last valid JWKS for existing trusted keys and rejects unknown keys.
 
 ## Central Validation PDP
 
