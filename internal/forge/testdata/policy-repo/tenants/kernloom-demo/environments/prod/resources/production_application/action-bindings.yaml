@@ -1,0 +1,27 @@
+application:
+  id: production_application
+  tenant: kernloom-demo
+  environment: prod
+
+actions:
+  - id: runtime.abnormal_source_mitigation
+    canonical_action: kernloom_action.runtime_abnormal_source_mitigation
+    type: action_type.runtime_mitigation
+    sensitivity: high
+    approval:
+      status: approved
+      approved_by: security-platform
+    bindings:
+      - id: abnormal_source_rate_limit_klshield
+        target_ref: environments/prod/targets/klshield-prod.yaml
+        capability: enforce.runtime.rate_limit_entity
+        selector:
+          type: selector.klshield.entity.v1
+          entity_type: entity_type.network_source
+        controls:
+          - runtime_action_applied
+          - runtime_action_readback
+        proof:
+          expected_events:
+            - event.runtime_action_applied
+            - event.runtime_action_readback

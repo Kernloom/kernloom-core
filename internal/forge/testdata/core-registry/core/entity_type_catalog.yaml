@@ -1,0 +1,5 @@
+kind: EntityTypeCatalog
+spec:
+  entries:
+    - id: entity_type.network_source
+    - id: entity_type.application

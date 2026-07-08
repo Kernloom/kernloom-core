@@ -1,0 +1,5 @@
+kind: SelectorSchemaCatalog
+spec:
+  entries:
+    - id: selector.klshield.entity.v1
+    - id: selector.ziti.service_policy.v1

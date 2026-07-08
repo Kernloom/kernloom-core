@@ -43,3 +43,16 @@ jobs:
           KERNLOOM_TEST_POSTGRES_DSN: postgres://kernloom:kernloom@127.0.0.1:5432/kernloom_test?sslmode=disable
           KERNLOOM_TEST_REDIS_ADDR: 127.0.0.1:6379
       - run: make build
+      - run: bin/klctl registry validate --core-registry internal/forge/testdata/core-registry --enterprise-registry internal/forge/testdata/enterprise-registry
+      - name: Optional adapter runtime verify
+        if: ${{ vars.KERNLOOM_CI_ADAPTER_VERIFY_ENDPOINT != '' }}
+        run: >
+          bin/klctl adapter verify
+          --adapter "$KERNLOOM_CI_ADAPTER_VERIFY_ID"
+          --endpoint "$KERNLOOM_CI_ADAPTER_VERIFY_ENDPOINT"
+          --manifest "$KERNLOOM_CI_ADAPTER_VERIFY_MANIFEST"
+          --dev-insecure-transport
+        env:
+          KERNLOOM_CI_ADAPTER_VERIFY_ID: ${{ vars.KERNLOOM_CI_ADAPTER_VERIFY_ID }}
+          KERNLOOM_CI_ADAPTER_VERIFY_ENDPOINT: ${{ vars.KERNLOOM_CI_ADAPTER_VERIFY_ENDPOINT }}
+          KERNLOOM_CI_ADAPTER_VERIFY_MANIFEST: ${{ vars.KERNLOOM_CI_ADAPTER_VERIFY_MANIFEST }}

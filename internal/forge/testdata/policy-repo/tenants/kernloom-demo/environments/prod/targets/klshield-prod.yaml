@@ -1,0 +1,15 @@
+target:
+  id: klshield-prod
+  tenant: kernloom-demo
+  environment: prod
+  type: klshield_runtime
+  adapter: kernloom.adapter.klshield
+  adapter_version: test
+  capabilities:
+    - enforce.runtime.rate_limit_entity
+  validation_profiles:
+    - validation.klshield.runtime_action.v1
+  validation_source:
+    mode: git
+    repo_ref: repo.kernloom-demo-klshield-config
+    base_path: envs/prod

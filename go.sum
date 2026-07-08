@@ -36,6 +36,10 @@ github.com/jackc/puddle/v2 v2.2.2 h1:PR8nw+E/1w0GLuRFSmiioY6UooMp6KJv0/61nB7icHo
 github.com/jackc/puddle/v2 v2.2.2/go.mod h1:vriiEXHvEE654aYKXXjOvZM39qJ0q+azkZFrfEOc3H4=
 github.com/kernloom/kernloom-protocol v0.0.0-20260703120054-13fd22d41fdf h1:1yP4jbDQB6ZKn53I6gy40/flfPiKNulONbTEcwOT1CE=
 github.com/kernloom/kernloom-protocol v0.0.0-20260703120054-13fd22d41fdf/go.mod h1:icLp4wUbeL4Hib5vtvqDD/K5ikvSaOx1pKQytptbNcc=
+github.com/kernloom/kernloom-protocol v0.0.0-20260708121330-29a6bd5bd1e9 h1:Qjbm6V0kHrofSBxNF0RR+rktgefUIcwqtoIH0Ft8rJE=
+github.com/kernloom/kernloom-protocol v0.0.0-20260708121330-29a6bd5bd1e9/go.mod h1:icLp4wUbeL4Hib5vtvqDD/K5ikvSaOx1pKQytptbNcc=
+github.com/kernloom/kernloom-protocol v0.0.0-20260708124119-9690cc6a5d0a h1:5ZVeGmEbOjbYSRFWlH9AuJCbuO+KuzdLD2/1/7l+vi4=
+github.com/kernloom/kernloom-protocol v0.0.0-20260708124119-9690cc6a5d0a/go.mod h1:icLp4wUbeL4Hib5vtvqDD/K5ikvSaOx1pKQytptbNcc=
 github.com/kr/pretty v0.3.0 h1:WgNl7dwNpEZ6jJ9k1snq4pZsg7DOEN8hP9Xw0Tsjwk0=
 github.com/kr/pretty v0.3.0/go.mod h1:640gp4NfQd8pI5XOwp5fnNeVWj67G7CFk/SaSQn7NBk=
 github.com/kr/text v0.2.0 h1:5Nx0Ya0ZqY2ygV366QzturHI13Jq95ApcVaJBhpS+AY=

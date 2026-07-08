@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kernloom.dev/schemas/capability-catalog.schema.json",
+  "title": "Kernloom capability catalog",
+  "type": "object",
+  "required": ["kind", "spec"],
+  "properties": {
+    "kind": { "enum": ["CapabilityCatalog"] },
+    "metadata": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "version": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "spec": {
+      "type": "object",
+      "required": ["capabilities"],
+      "properties": {
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "kind", "status"],
+            "properties": {
+              "id": { "type": "string", "minLength": 1 },
+              "kind": { "enum": ["observe", "enforce_runtime", "plan_config", "validate_config", "read_state", "provide_evidence", "provide_relationship", "provide_attestation", "compute", "evaluate"] },
+              "status": { "enum": ["experimental", "stable", "deprecated", "planned"] },
+              "semantic": { "type": "string" },
+              "supported_actions": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+              "compatibility_aliases": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+              "supported_granularities": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+              "target_scopes": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+              "context_requirements": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+              "privilege_requirements": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+              "evidence_requirements": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+              "failure_semantics": {
+                "type": "object",
+                "properties": {
+                  "unknown_is_success": { "type": "boolean" }
+                },
+                "additionalProperties": false
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

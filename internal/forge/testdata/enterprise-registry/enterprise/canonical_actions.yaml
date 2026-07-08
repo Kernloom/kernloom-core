@@ -1,0 +1,16 @@
+kind: CanonicalActionCatalog
+metadata:
+  id: enterprise.default.canonical_actions
+  version: vtest
+spec:
+  actions:
+    - id: kernloom_action.runtime_abnormal_source_mitigation
+      type: action_type.runtime_mitigation
+      sensitivity: high
+      owner: security-platform
+      required_controls:
+        - runtime_action_applied
+        - runtime_action_readback
+      required_events:
+        - event.runtime_action_applied
+        - event.runtime_action_readback
