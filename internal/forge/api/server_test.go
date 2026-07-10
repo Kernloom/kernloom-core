@@ -474,6 +474,20 @@ func TestApprovePolicyBuildManifestMakesPlannerReachable(t *testing.T) {
 	if planResp.Code != http.StatusCreated {
 		t.Fatalf("expected assignment planner to accept approved build, got %d: %s", planResp.Code, planResp.Body.String())
 	}
+	var assignmentEnvelope signing.SignedEnvelope
+	if err := json.Unmarshal(planResp.Body.Bytes(), &assignmentEnvelope); err != nil {
+		t.Fatal(err)
+	}
+	var assignment domain.KLIQAssignment
+	if err := json.Unmarshal(assignmentEnvelope.Payload, &assignment); err != nil {
+		t.Fatal(err)
+	}
+	if len(assignment.Artifacts) != 1 {
+		t.Fatalf("expected one assignment artifact, got %#v", assignment.Artifacts)
+	}
+	if got, want := assignment.Artifacts[0].SHA256, domain.SHA256JSON(runtimePayload); got != want {
+		t.Fatalf("expected embedded envelope digest %s, got %s", want, got)
+	}
 	events, err := store.AuditEvents(t.Context(), "policy_build_manifest", approved.Manifest.Metadata.ID)
 	if err != nil {
 		t.Fatal(err)

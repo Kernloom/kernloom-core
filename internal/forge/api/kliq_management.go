@@ -962,7 +962,7 @@ func (s Server) resolveAssignmentArtifacts(r *http.Request, req assignmentPlanRe
 			ArtifactType: strings.TrimSpace(requested.ArtifactType),
 			ArtifactID:   strings.TrimSpace(requested.ArtifactID),
 			ArtifactRef:  ref.URI,
-			SHA256:       ref.SHA256,
+			SHA256:       domain.SHA256JSON(payload),
 			Envelope:     json.RawMessage(payload),
 		})
 	}
